@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# Impeccable (local live tooling)
+.impeccable/
+
+# Generated runtime payloads (refreshed by src/main.py)
+data/runtime/
+
+# Secrets
+.env
+.env.*

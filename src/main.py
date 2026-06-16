@@ -263,6 +263,134 @@ def _load_most_relevant_sdg():
         return _reorder_payload_with_by_mdb(json.load(f))
 
 
+RUNTIME_DATA_DIR = os.path.join(DATA_DIR, "runtime")
+
+
+def _img_tag(src: str, alt: str, *, lazy: bool = False, class_name: str = "") -> str:
+    loading = ' loading="lazy" decoding="async"' if lazy else ""
+    cls = f' class="{class_name}"' if class_name else ""
+    return f'<img src="{src}" alt="{alt}"{cls}{loading} />'
+
+
+def _topology_data_path() -> Optional[str]:
+    for name in ("countries-110m.json", "countries-10m.json"):
+        path = os.path.join(DATA_DIR, name)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _write_json_file(path: str, payload) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, separators=(",", ":"))
+
+
+def _write_dashboard_runtime_data(
+    *,
+    mdb_totals_list,
+    country_totals,
+    most_relevant_sdg,
+    sdg_cooccurrence,
+    country_need_project_similarity,
+    iso_numeric_to_alpha2,
+    alpha2_to_alpha3,
+    alpha3_to_alpha2,
+    alpha3_to_country_name,
+) -> Dict[str, str]:
+    """Write processed payloads for client fetch; return manifest (window var -> URL path)."""
+    os.makedirs(RUNTIME_DATA_DIR, exist_ok=True)
+    runtime_payloads = {
+        "mdb_totals.json": mdb_totals_list,
+        "country_totals.json": country_totals,
+        "most_relevant_sdg.json": most_relevant_sdg,
+        "sdg_cooccurrence.json": sdg_cooccurrence if sdg_cooccurrence is not None else None,
+        "country_need_project_similarity.json": country_need_project_similarity,
+        "iso_maps.json": {
+            "ISO_NUMERIC_TO_ALPHA2": iso_numeric_to_alpha2,
+            "ALPHA2_TO_ALPHA3": alpha2_to_alpha3,
+            "ALPHA3_TO_ALPHA2": alpha3_to_alpha2,
+            "COUNTRY_NAMES": alpha3_to_country_name,
+        },
+    }
+    for name, payload in runtime_payloads.items():
+        _write_json_file(os.path.join(RUNTIME_DATA_DIR, name), payload)
+
+    def rel(path: str) -> str:
+        return os.path.relpath(path, PROJECT_ROOT).replace(os.sep, "/")
+
+    topology_path = _topology_data_path()
+    if not topology_path:
+        raise FileNotFoundError("Missing data/countries-110m.json (or countries-10m.json) for map topology.")
+
+    return {
+        "SDG_TOTALS": rel(SDG_TOTALS_JSON),
+        "MDB_TOTALS": rel(os.path.join(RUNTIME_DATA_DIR, "mdb_totals.json")),
+        "COUNTRY_TOTALS": rel(os.path.join(RUNTIME_DATA_DIR, "country_totals.json")),
+        "SDG_INDEX": rel(os.path.join(DATA_DIR, "sdg_index.json")),
+        "ISO_MAPS": rel(os.path.join(RUNTIME_DATA_DIR, "iso_maps.json")),
+        "COUNTRY_TOPOLOGY": rel(topology_path),
+        "MOST_RELEVANT_SDG_DATA": rel(os.path.join(RUNTIME_DATA_DIR, "most_relevant_sdg.json")),
+        "SDG_COOCCURRENCE": rel(os.path.join(RUNTIME_DATA_DIR, "sdg_cooccurrence.json")),
+        "COUNTRY_NEED_PROJECT_SIMILARITY": rel(os.path.join(RUNTIME_DATA_DIR, "country_need_project_similarity.json")),
+        "COUNTRY_FY26_INCOME_GROUP": rel(FY26_INCOME_GROUPS_JSON),
+        "MDB_AMOUNT_HISTOGRAM": rel(PIPELINE.out_path("mdb_amount_histogram")),
+        "MR_CHORD_FLOWS": rel(PIPELINE.out_path("mr_chord_flows")),
+        "MR_AMOUNT_SAMPLES": rel(PIPELINE.out_path("mr_amount_samples")),
+    }
+
+
+def _dashboard_data_bootstrap_js(manifest: Dict[str, str]) -> str:
+    manifest_js = json.dumps(manifest, separators=(",", ":"))
+    return f"""
+        (function() {{
+            var MANIFEST = {manifest_js};
+            function fetchJson(url) {{
+                return fetch(url, {{ credentials: "same-origin" }}).then(function(res) {{
+                    if (!res.ok) throw new Error("Failed to load " + url + " (" + res.status + ")");
+                    return res.json();
+                }});
+            }}
+            window.dashboardDataReady = Promise.all([
+                fetchJson(MANIFEST.SDG_TOTALS).then(function(d) {{ window.SDG_TOTALS = d; }}),
+                fetchJson(MANIFEST.MDB_TOTALS).then(function(d) {{ window.MDB_TOTALS = d; }}),
+                fetchJson(MANIFEST.COUNTRY_TOTALS).then(function(d) {{ window.COUNTRY_TOTALS = d; }}),
+                fetchJson(MANIFEST.SDG_INDEX).then(function(d) {{ window.SDG_INDEX = d; }}),
+                fetchJson(MANIFEST.ISO_MAPS).then(function(d) {{
+                    window.ISO_NUMERIC_TO_ALPHA2 = d.ISO_NUMERIC_TO_ALPHA2 || {{}};
+                    window.ALPHA2_TO_ALPHA3 = d.ALPHA2_TO_ALPHA3 || {{}};
+                    window.ALPHA3_TO_ALPHA2 = d.ALPHA3_TO_ALPHA2 || {{}};
+                    window.COUNTRY_NAMES = d.COUNTRY_NAMES || {{}};
+                }}),
+                fetchJson(MANIFEST.COUNTRY_TOPOLOGY).then(function(d) {{ window.COUNTRY_TOPOLOGY = d; }}),
+                fetchJson(MANIFEST.MOST_RELEVANT_SDG_DATA).then(function(d) {{ window.MOST_RELEVANT_SDG_DATA = d; }}),
+                fetchJson(MANIFEST.SDG_COOCCURRENCE).then(function(d) {{ window.SDG_COOCCURRENCE = d; }}),
+                fetchJson(MANIFEST.COUNTRY_NEED_PROJECT_SIMILARITY).then(function(d) {{ window.COUNTRY_NEED_PROJECT_SIMILARITY = d; }}),
+                fetchJson(MANIFEST.COUNTRY_FY26_INCOME_GROUP).then(function(d) {{ window.COUNTRY_FY26_INCOME_GROUP = d; }}),
+                fetchJson(MANIFEST.MDB_AMOUNT_HISTOGRAM).then(function(d) {{ window.MDB_AMOUNT_HISTOGRAM = d; }}),
+                fetchJson(MANIFEST.MR_CHORD_FLOWS).then(function(d) {{ window.MR_CHORD_FLOWS = d; }}),
+                fetchJson(MANIFEST.MR_AMOUNT_SAMPLES).then(function(d) {{ window.MR_AMOUNT_SAMPLES = d; }}),
+            ]).catch(function(err) {{
+                console.error("Dashboard data failed to load:", err);
+                var row = document.getElementById("main-row");
+                if (row && !document.getElementById("dashboard-data-error")) {{
+                    var banner = document.createElement("div");
+                    banner.id = "dashboard-data-error";
+                    banner.setAttribute("role", "alert");
+                    banner.className = "dashboard-data-error";
+                    banner.textContent = "Dashboard data could not be loaded. Serve this folder over HTTP (e.g. python3 -m http.server) and run python3 src/main.py to refresh data/runtime/.";
+                    row.parentNode.insertBefore(banner, row);
+                }}
+                throw err;
+            }});
+            function whenDashboardReady(fn) {{
+                (window.dashboardDataReady || Promise.resolve()).then(fn);
+            }}
+            window.whenDashboardReady = whenDashboardReady;
+        }})();
+    """
+
+
 ACKNOWLEDGEMENT_BODY_FULL = """
                                 <p>The MDB-SDG Dashboard is a by-product of one of my ongoing research projects. It was originally designed to facilitate analysis for that study, but it soon occurred to me that it might also offer valuable insights to fellow researchers seeking a broad overview of MDBs' operations across the Sustainable Development Goals.</p>
                                 <p>I would like to extend my special thanks to four individuals: Dr. Yixin Yao, my former supervisor at ADBI, who encouraged me to explore MDB documentation; Dr. Daniel Suryadarma and Dr. Dil Rahut, my other supervisors at ADBI, who had strong faith in me and gave me the freedom to pursue my research; and Dr. John W. McArthur, a participant at the ADBI Annual Conference 2023. Organizing the conference and transforming his presentation into <a href="https://www.adb.org/publications/striving-to-meet-the-sustainable-development-goals-next-steps-for-policymakers-and-practitioners" target="_blank" rel="noopener">a policy note</a> turned me from an SDG skeptic into a practitioner. Yes, the SDGs may soon reach their target year; they will be updated, and a new framework will emerge. However, having a unifying framework for sustainable development is of invaluable importance in practice, and studying it can help inform future efforts.</p>
@@ -307,7 +435,7 @@ def _peer_review_head_extra() -> str:
             top: 0;
             width: 100vw;
             height: 100vh;
-            z-index: 2147483647;
+            z-index: var(--z-watermark, 1000);
             pointer-events: none;
             overflow: visible;
             -webkit-print-color-adjust: exact;
@@ -414,11 +542,11 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         if not os.path.exists(logo_path):
             img_tag = f'<div class="btn-label">{org}</div>'
         else:
-            img_tag = f'<img src="{rel_logo_path}" alt="{org}" class="btn-image" />'
+            img_tag = _img_tag(rel_logo_path, org, lazy=True, class_name="btn-image")
 
         buttons_html.append(
             f"""
-            <button class="mdb-button{logo_sm_class}" type="button" data-mdb-index="{idx}" data-mdb-code="{org}" onclick="showNumber({idx})" title="{org}">
+            <button class="mdb-button{logo_sm_class}" type="button" data-mdb-index="{idx}" data-mdb-code="{org}" onclick="showNumber({idx})" title="{org}" aria-label="Filter by {org}">
                 {img_tag}
             </button>
             """
@@ -444,9 +572,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         sdg_inverted_paths.append(_rel(os.path.join(sdg_inverted_dir, f"E Inverted Icons_WEB-{i:02d}.png")))
     sdg_inverted_paths.append(_rel(os.path.join(sdg_inverted_dir, "global-goals.png")))
     sdg_country_logos_html = "\n".join(
-        f'<div class="map-sdg-logo-wrap" data-sdg-index="{i + 1}" role="button" tabindex="0" title="SDG {i + 1}"><img src="{path}" alt="SDG {i + 1}" /></div>'
+        f'<div class="map-sdg-logo-wrap" data-sdg-index="{i + 1}" role="button" tabindex="0" title="SDG {i + 1}">{_img_tag(path, f"SDG {i + 1}", lazy=True)}</div>'
         if i < 17 else
-        f'<div class="map-sdg-logo-wrap map-sdg-logo-global" data-sdg-index="0" role="button" tabindex="0" title="All SDGs"><img src="{path}" alt="SDG All" /></div>'
+        f'<div class="map-sdg-logo-wrap map-sdg-logo-global" data-sdg-index="0" role="button" tabindex="0" title="All SDGs">{_img_tag(path, "SDG All", lazy=True)}</div>'
         for i, path in enumerate(sdg_inverted_paths)
     )
     sdg_icon_paths = [
@@ -456,15 +584,15 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
     e_sdg_logo_dir = os.path.join(ASSETS_DIR, "E SDG logo WEB")
     e_sdg_logo_path = _rel(os.path.join(e_sdg_logo_dir, "E_SDG_logo_Square_Transparent_WEB.png")) if os.path.exists(os.path.join(e_sdg_logo_dir, "E_SDG_logo_Square_Transparent_WEB.png")) else ""
     home_sdg_legend_html_row1 = "".join(
-        f'<div class="home-sdg-legend-item" data-sdg-index="{i+1}"><img src="{sdg_crop_paths[i]}" alt="SDG {i+1}" title="SDG {i+1}" /></div>'
+        f'<div class="home-sdg-legend-item" data-sdg-index="{i+1}">{_img_tag(sdg_crop_paths[i], f"SDG {i+1}", lazy=True)}</div>'
         for i in range(9)
     )
     home_sdg_legend_html_row2 = "".join(
-        f'<div class="home-sdg-legend-item" data-sdg-index="{i+1}"><img src="{sdg_crop_paths[i]}" alt="SDG {i+1}" title="SDG {i+1}" /></div>'
+        f'<div class="home-sdg-legend-item" data-sdg-index="{i+1}">{_img_tag(sdg_crop_paths[i], f"SDG {i+1}", lazy=True)}</div>'
         for i in range(9, 17)
     )
     if e_sdg_logo_path:
-        home_sdg_legend_html_row2 += f'<div class="home-sdg-legend-item home-sdg-legend-e-logo" data-sdg-index="0"><img src="{e_sdg_logo_path}" alt="SDGs" title="Sustainable Development Goals" /></div>'
+        home_sdg_legend_html_row2 += f'<div class="home-sdg-legend-item home-sdg-legend-e-logo" data-sdg-index="0">{_img_tag(e_sdg_logo_path, "SDGs", lazy=True)}</div>'
     # Official UN SDG colors (hex) for goals 1–17
     sdg_colors = [
         "#E5233D", "#DDA73A", "#4CA146", "#C5192D", "#EF402C", "#27BFE6",
@@ -473,7 +601,6 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
     ]
     sdg_gradient_border = "linear-gradient(to right, " + ", ".join(sdg_colors) + ")"
     sdg_conic_border = "conic-gradient(from 0deg, " + ", ".join([f"{sdg_colors[i]} {i*360/17:.2f}deg" for i in range(17)]) + f", {sdg_colors[0]} 360deg)"
-    sdg_totals = _load_sdg_totals()
     mdb_totals_list = _load_mdb_totals()
     country_totals = _load_country_totals()
     sdg_index = _load_sdg_index()
@@ -481,37 +608,31 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
     alpha2_to_alpha3 = _alpha2_to_alpha3()
     alpha3_to_alpha2 = _alpha3_to_alpha2()
     alpha3_to_country_name = _alpha3_to_country_name()
-    country_topology = _load_country_topology()
     most_relevant_sdg = _load_most_relevant_sdg()
     sdg_cooccurrence = _load_sdg_cooccurrence()
-    country_fy26_income_groups = _load_country_fy26_income_groups(project_root)
     country_need_project_similarity = _build_country_need_project_cosine(
         country_totals=country_totals,
         sdg_index=sdg_index,
         years=list(range(2016, 2026)),
         include_vectors=True,
     )
-    mdb_amount_histogram = _load_mdb_amount_histogram()
-    sdg_totals_js = json.dumps(sdg_totals)
-    mdb_totals_js = json.dumps(mdb_totals_list)
+    data_manifest = _write_dashboard_runtime_data(
+        mdb_totals_list=mdb_totals_list,
+        country_totals=country_totals,
+        most_relevant_sdg=most_relevant_sdg,
+        sdg_cooccurrence=sdg_cooccurrence,
+        country_need_project_similarity=country_need_project_similarity,
+        iso_numeric_to_alpha2=iso_numeric_to_alpha2,
+        alpha2_to_alpha3=alpha2_to_alpha3,
+        alpha3_to_alpha2=alpha3_to_alpha2,
+        alpha3_to_country_name=alpha3_to_country_name,
+    )
+    data_bootstrap_js = _dashboard_data_bootstrap_js(data_manifest)
+    data_preload_links = "\n".join(
+        f'    <link rel="preload" href="{url}" as="fetch" crossorigin />'
+        for url in (data_manifest["SDG_TOTALS"], data_manifest["MDB_TOTALS"], data_manifest["COUNTRY_TOTALS"])
+    )
     mdb_names_js = json.dumps(MDB_SIDEBAR_ORDER)
-    country_totals_js = json.dumps(country_totals)
-    sdg_index_js = json.dumps(sdg_index)
-    iso_numeric_to_alpha2_js = json.dumps(iso_numeric_to_alpha2)
-    country_names_js = json.dumps(alpha3_to_country_name)
-    alpha2_to_alpha3_js = json.dumps(alpha2_to_alpha3)
-    alpha3_to_alpha2_js = json.dumps(alpha3_to_alpha2)
-    # 内嵌 TopoJSON，避免在 file:// 下 fetch 失败（浏览器会拦截本地文件请求）
-    country_topology_js = json.dumps(country_topology) if country_topology else "null"
-    most_relevant_sdg_js = json.dumps(most_relevant_sdg)
-    sdg_cooccurrence_js = json.dumps(sdg_cooccurrence) if sdg_cooccurrence else "null"
-    country_need_project_similarity_js = json.dumps(country_need_project_similarity)
-    country_fy26_income_js = json.dumps(_load_country_fy26_income_groups(PROJECT_ROOT))
-    mdb_amount_histogram_js = json.dumps(mdb_amount_histogram)
-    mr_chord_flows = _load_mr_chord_flows()
-    mr_amount_samples = _load_mr_amount_samples()
-    mr_chord_flows_js = json.dumps(mr_chord_flows)
-    mr_amount_samples_js = json.dumps(mr_amount_samples)
     home_chord_ring_path_js = json.dumps(sdg_ring_crop_path)
     sdg_icon_paths_js = json.dumps(sdg_icon_paths)
     sdg_crop_paths_js = json.dumps(sdg_crop_paths)
@@ -532,11 +653,11 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
     mdb_axis_icon_h = 48
     mdb_axis_gap = 2
     mdb_left_axis_html = "".join(
-        f'<div class="mdb-axis-y-item" data-sdg-index="{i}" role="button" tabindex="0" title="Select row SDG {i+1}"><img src="{sdg_crop_paths[i]}" alt="SDG {i+1}" /></div>'
+        f'<div class="mdb-axis-y-item" data-sdg-index="{i}" role="button" tabindex="0" title="Select row SDG {i+1}">{_img_tag(sdg_crop_paths[i], f"SDG {i+1}", lazy=True)}</div>'
         for i in range(17)
     )
     mdb_bottom_axis_html = "".join(
-        f'<div class="mdb-axis-x-item" data-sdg-index="{i}" role="button" tabindex="0" title="Select column SDG {i+1}"><img src="{sdg_crop_paths[i]}" alt="SDG {i+1}" /></div>'
+        f'<div class="mdb-axis-x-item" data-sdg-index="{i}" role="button" tabindex="0" title="Select column SDG {i+1}">{_img_tag(sdg_crop_paths[i], f"SDG {i+1}", lazy=True)}</div>'
         for i in range(17)
     )
     mdb_global_logo_path = sdg_inverted_paths[-1] if sdg_inverted_paths else ""
@@ -581,29 +702,104 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 <html lang="en"{html_root_class}>
 <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>{page_title}</title>
+    {data_preload_links}
     {peer_review_head_extra}
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
     <style>
         {lite_css}
+        :root {{
+            --color-hue: 264;
+            --color-bg: oklch(97.5% 0.006 var(--color-hue));
+            --color-surface: oklch(100% 0 0);
+            --color-surface-muted: oklch(98.2% 0.004 var(--color-hue));
+            --color-surface-hover: oklch(98.8% 0.003 var(--color-hue));
+            --color-ink: oklch(21% 0.025 var(--color-hue));
+            --color-ink-muted: oklch(37% 0.022 var(--color-hue));
+            --color-ink-subtle: oklch(44.5% 0.024 var(--color-hue));
+            --color-ink-hint: oklch(48% 0.022 var(--color-hue));
+            --color-accent: oklch(48.5% 0.19 var(--color-hue));
+            --color-accent-strong: oklch(52% 0.2 var(--color-hue));
+            --color-accent-soft: color-mix(in oklch, var(--color-accent) 12%, transparent);
+            --color-metric-amount: oklch(52% 0.14 145);
+            --color-border: oklch(68% 0.02 var(--color-hue));
+            --color-border-muted: oklch(86% 0.008 var(--color-hue));
+            --color-divider: oklch(92% 0.006 var(--color-hue));
+            --color-switch-track: oklch(84% 0.01 var(--color-hue));
+            --color-switch-track-hover: oklch(78% 0.012 var(--color-hue));
+            --color-sidebar: oklch(21% 0.025 var(--color-hue));
+            --color-on-inverse: oklch(100% 0 0);
+            --color-on-sidebar: oklch(98.5% 0.004 var(--color-hue));
+            --color-error-bg: oklch(96% 0.03 25);
+            --color-error-ink: oklch(40% 0.15 25);
+            --color-error-border: oklch(88% 0.06 25);
+            --color-focus-map: oklch(45% 0.1 175);
+            --space-1: 4px;
+            --space-2: 8px;
+            --space-3: 12px;
+            --space-4: 16px;
+            --space-5: 20px;
+            --space-6: 24px;
+            --space-8: 32px;
+            --space-10: 40px;
+            --space-12: 48px;
+            --space-16: 64px;
+            --layout-sidebar: 240px;
+            --layout-chart-min: 280px;
+            --layout-chart-min-height: 480px;
+            --layout-chart-stage-min-height: 520px;
+            --layout-chart: 100%;
+            --layout-main-gap: clamp(var(--space-4), 2vw, var(--space-8));
+            --layout-shell: 100%;
+            --layout-chart-nudge: -10px;
+            --z-dropdown: 10;
+            --z-sticky: 20;
+            --z-modal: 100;
+            --z-tooltip: 200;
+            --z-watermark: 1000;
+            --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+            --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+            --duration-fast: 150ms;
+            --duration-normal: 250ms;
+            --duration-expand: 350ms;
+        }}
+
         body {{
             margin: 0;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background-color: #f5f5f7;
+            background-color: var(--color-bg);
+            color: var(--color-ink);
+            padding-top: env(safe-area-inset-top, 0px);
+            padding-right: env(safe-area-inset-right, 0px);
+            padding-bottom: env(safe-area-inset-bottom, 0px);
+            padding-left: env(safe-area-inset-left, 0px);
+            -webkit-tap-highlight-color: color-mix(in oklch, var(--color-accent) 18%, transparent);
+        }}
+
+        .dashboard-data-error {{
+            margin: var(--space-4);
+            padding: var(--space-3) var(--space-4);
+            border-radius: 8px;
+            background: var(--color-error-bg);
+            color: var(--color-error-ink);
+            border: 1px solid var(--color-error-border);
+            font-size: 14px;
+            line-height: 1.5;
         }}
 
         .page {{
             display: flex;
             flex-direction: column;
-            min-height: 100vh;
-            padding: 0 100px;
+            min-height: 100dvh;
             box-sizing: border-box;
         }}
 
         .dashboard-inner {{
-            width: 1740px;
-            min-width: 1740px;
-            margin: 0 auto;
+            width: 100%;
+            max-width: none;
+            min-width: 0;
+            margin: 0;
             flex: 1;
             display: flex;
             flex-direction: column;
@@ -611,28 +807,147 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
         .nav {{
             height: 112px;
-            background: #ffffff;
+            background: var(--color-surface);
             display: flex;
             align-items: stretch;
             flex-shrink: 0;
+            position: relative;
+            border-bottom: 2px solid var(--color-border);
         }}
 
         .nav-inner {{
-            width: 100%;
+            flex: 1;
+            min-width: 0;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            border-bottom: 2px solid #9ca3af;
             box-sizing: border-box;
+        }}
+
+        .nav-brand {{
+            display: flex;
+            align-items: center;
+            min-width: 0;
+        }}
+
+        .nav-brand-text {{
+            display: none;
+            min-width: 0;
+        }}
+
+        .nav-brand-name {{
+            margin: 0;
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--color-ink);
+            line-height: 1.2;
+        }}
+
+        .nav-brand-context {{
+            margin: 2px 0 0;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--color-accent);
+            line-height: 1.2;
+        }}
+
+        .nav-label-short {{
+            display: none;
+        }}
+
+        .nav-tab-home {{
+            display: none;
+        }}
+
+        .nav-menu-btn {{
+            display: none;
+            align-items: center;
+            gap: var(--space-2);
+            min-height: 44px;
+            padding: var(--space-2) var(--space-3);
+            border: 1px solid var(--color-border-muted);
+            border-radius: 8px;
+            background: var(--color-surface);
+            color: var(--color-ink);
+            font-size: 13px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: background var(--duration-fast), border-color var(--duration-fast);
+        }}
+
+        .nav-menu-btn:hover {{
+            background: var(--color-surface-hover);
+            border-color: var(--color-border);
+        }}
+
+        .nav-menu-icon {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--color-ink-subtle);
+        }}
+
+        .nav-menu-icon svg {{
+            display: block;
+        }}
+
+        .nav-menu-popover {{
+            margin: 0;
+            padding: 0;
+            border: none;
+            background: transparent;
+        }}
+
+        .nav-menu-popover::backdrop {{
+            background: rgba(17, 24, 39, 0.28);
+        }}
+
+        @keyframes nav-menu-reveal {{
+            from {{
+                opacity: 0;
+                transform: translateY(-6px);
+            }}
+            to {{
+                opacity: 1;
+                transform: translateY(0);
+            }}
+        }}
+
+        @media (prefers-reduced-motion: reduce) {{
+            .nav-menu-popover:popover-open,
+            .nav-menu-popover.is-open {{
+                animation: none;
+            }}
+        }}
+
+        @media (min-width: 769px) {{
+            .nav-menu-popover {{
+                display: flex !important;
+                align-items: center;
+                flex-shrink: 0;
+                position: static;
+                width: auto;
+                height: auto;
+                overflow: visible;
+                inset: auto;
+            }}
+            .nav-menu-popover::backdrop {{
+                display: none;
+            }}
+            .nav-menu-popover .nav-links {{
+                margin-right: var(--space-6);
+            }}
         }}
 
         .nav-home {{
             display: flex;
             align-items: center;
-            padding: 8px 0;
-            border-radius: 8px;
-            transition: background 0.15s;
-            margin-left: 20px;
+            padding: var(--space-2) 0;
+            border-radius: var(--space-2);
+            transition: background var(--duration-fast);
+            margin-left: var(--space-5);
             cursor: pointer;
         }}
         .nav-home:hover {{
@@ -646,51 +961,69 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
         .nav-links {{
             display: flex;
-            gap: 16px;
+            gap: var(--space-4);
             align-items: center;
-            margin-right: 25px;
+            margin-right: var(--space-6);
         }}
         .nav-links a {{
-            color: #111827;
+            color: var(--color-ink);
             font-size: 18px;
             font-weight: 700;
-            padding: 10px 20px;
+            padding: 10px var(--space-5);
             border-radius: 6px;
             text-decoration: none;
             cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }}
         .nav-links a:hover {{
             background: rgba(17,24,39,0.06);
         }}
         .nav-links a.active {{
             background: rgba(37,99,235,0.12);
-            color: #1d4ed8;
+            color: var(--color-accent);
+        }}
+
+        .nav-links a[aria-selected="true"] {{
+            background: rgba(37,99,235,0.12);
+            color: var(--color-accent);
         }}
 
         .main-row {{
             display: flex;
+            flex-direction: column;
             flex: 1;
             min-height: 0;
             width: 100%;
-            padding: 6px 0 24px 0;
+            padding: var(--space-2) var(--space-4) var(--space-6);
             box-sizing: border-box;
-            gap: 100px;
+            gap: var(--space-4);
+        }}
+        .main-row-body {{
+            display: flex;
+            flex: 1;
+            min-height: 0;
+            width: 100%;
+            gap: var(--layout-main-gap);
+            align-items: flex-start;
         }}
 
         /* 与 chart-wrapper、map-wrapper 统一高度 1100px；纵向向上 10px：margin-top 14px（手动调此处） */
         .sidebar {{
-            width: 240px;
+            width: var(--layout-sidebar);
+            flex: 0 0 var(--layout-sidebar);
             height: 1100px;
             min-height: 1100px;
-            background-color: #111827;
-            padding: 12px 12px 12px;
+            background-color: var(--color-sidebar);
+            padding: var(--space-3);
             box-sizing: border-box;
             display: flex;
             flex-direction: column;
-            gap: 4px;
-            border-radius: 16px;
+            gap: var(--space-1);
+            border-radius: var(--space-4);
             align-self: flex-start;
-            margin-top: 14px;
+            margin-top: calc(var(--space-3) + 2px);
         }}
 
         /* space-between + small block padding: top/bottom slightly less than space-around */
@@ -710,21 +1043,23 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             aspect-ratio: 3.15 / 1;
             max-height: 82px;
             border-radius: 8px;
-            border: 1px solid #d1d5db;
-            background-color: #ffffff;
+            border: 1px solid var(--color-border-muted);
+            background-color: var(--color-surface);
             cursor: pointer;
             padding: 0;
             display: flex;
             align-items: center;
             justify-content: center;
-            transition: transform 0.08s ease-out, box-shadow 0.08s ease-out, border-color 0.08s;
+            transition: transform var(--duration-fast) var(--ease-out),
+                        box-shadow var(--duration-fast) var(--ease-out),
+                        border-color var(--duration-fast) var(--ease-out);
             overflow: hidden;
         }}
 
         .mdb-button:hover {{
             transform: translateY(-1px);
             box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
-            border-color: #9ca3af;
+            border-color: var(--color-border);
         }}
 
         .mdb-button:active {{
@@ -733,16 +1068,16 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
         /* Selected: white fill + blue border/ring (all MDB buttons, including WBG/IFC) */
         .mdb-button.selected {{
-            border-color: #1d4ed8;
+            border-color: var(--color-accent);
             box-shadow: 0 0 0 4px rgba(37,99,235,0.55);
-            background: #ffffff;
+            background: var(--color-surface);
         }}
 
         .btn-image {{
             width: 100%;
             height: 100%;
             object-fit: contain;
-            background-color: #ffffff;
+            background-color: var(--color-surface);
         }}
 
         /* WBG / IFC: logo at 80%; same selected style as other MDBs (no full-button blue fill) */
@@ -751,11 +1086,11 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             height: 80%;
             max-width: 80%;
             max-height: 80%;
-            background-color: #ffffff;
+            background-color: var(--color-surface);
         }}
 
         .btn-label {{
-            color: #374151;
+            color: var(--color-ink-muted);
             font-size: 18px;
             font-weight: 600;
         }}
@@ -766,7 +1101,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             flex-direction: column;
             align-items: stretch;
             justify-content: center;
-            background-color: #f5f5f7;
+            background-color: var(--color-bg);
             padding: 24px 0 24px 0;
             box-sizing: border-box;
             min-width: 0;
@@ -779,27 +1114,31 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             flex-direction: column;
             gap: 20px;
             width: 100%;
-            margin: 0 auto;
-            align-items: flex-end;
+            margin: 0;
+            align-items: stretch;
         }}
 
-        /* 与主页 home-right-wrapper 一致 1400px；纵向与主页/Country 一致：margin-top -10px */
+        /* Chart rows fill remaining main-column width */
         .mdb-chart-row {{
             position: relative;
             display: flex;
             align-items: center;
-            width: 1400px;
-            min-width: 1400px;
-            margin-top: -10px;
+            width: 100%;
+            min-width: 0;
+            margin-top: var(--layout-chart-nudge);
         }}
 
-        /* 与主页一致 1400px；圆角与 chart-wrapper 一致，避免裁切圆角；无右侧变淡/模糊 */
         .mdb-slider-wrapper {{
-            width: 1400px;
-            min-width: 1400px;
+            width: 100%;
+            min-width: var(--layout-chart-min);
+            min-height: var(--layout-chart-stage-min-height);
             overflow: hidden;
             position: relative;
             border-radius: 12px;
+            border: 1px solid var(--color-divider);
+            background: var(--color-surface-muted);
+            padding-block: var(--space-4);
+            box-sizing: border-box;
             mask-image: none;
             -webkit-mask-image: none;
         }}
@@ -827,7 +1166,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             border-radius: 50%;
             border: none;
             background: rgba(107, 114, 128, 0.35);
-            color: #fff;
+            color: var(--color-on-inverse);
             cursor: pointer;
             display: none;
             align-items: center;
@@ -854,7 +1193,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
 
         .mdb-arrow-left {{
-            left: -75px;
+            left: var(--space-3);
             top: 50%;
             transform: translateY(-50%);
         }}
@@ -864,7 +1203,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
 
         .mdb-arrow-right {{
-            left: calc(100% + 25px);
+            right: var(--space-3);
+            left: auto;
             top: 50%;
             transform: translateY(-50%);
         }}
@@ -883,30 +1223,24 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
         .mdb-slider {{
             display: flex;
-            width: 5600px;
-            transition: transform 0.4s ease;
+            width: 100%;
+            transition: transform 0.4s var(--ease-out);
         }}
 
-        .mdb-slider.mdb-slide-pos-0 {{
-            transform: translateX(0);
-        }}
-        .mdb-slider.mdb-slide-pos-1 {{
-            transform: translateX(-1400px);
-        }}
-        .mdb-slider.mdb-slide-pos-2 {{
-            transform: translateX(-2800px);
-        }}
-        .mdb-slider.mdb-slide-pos-3 {{
-            transform: translateX(-4200px);
-        }}
-
-        /* 与主页一致 1400px；padding-top 补偿 chart-wrapper margin-top:-10px 避免顶部被裁切 */
-        .mdb-slide-1 {{
+        .mdb-slide-1,
+        .mdb-slide-2,
+        .mdb-slide-3,
+        .mdb-slide-4 {{
             display: flex;
             flex-direction: column;
-            width: 1400px;
-            min-width: 1400px;
+            flex: 0 0 100%;
+            width: 100%;
+            min-width: 0;
             flex-shrink: 0;
+            box-sizing: border-box;
+        }}
+
+        .mdb-slide-1 {{
             padding-top: 10px;
         }}
 
@@ -934,19 +1268,10 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
 
         .mdb-slide-2 {{
-            display: flex;
-            flex-direction: column;
-            width: 1400px;
-            min-width: 1400px;
-            flex-shrink: 0;
+            min-height: 0;
         }}
 
         .mdb-slide-3 {{
-            display: flex;
-            flex-direction: column;
-            width: 1400px;
-            min-width: 1400px;
-            flex-shrink: 0;
             padding-top: 10px;
         }}
 
@@ -968,19 +1293,13 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 12px auto 0;
             max-width: 900px;
             font-size: 13px;
-            color: #6b7280;
+            color: var(--color-ink-hint);
             text-align: center;
         }}
 
         .mdb-slide-4 {{
-            display: flex;
-            flex-direction: column;
-            width: 1400px;
-            min-width: 1400px;
-            flex-shrink: 0;
             height: 1100px;
             padding: 0 24px 0 24px;
-            box-sizing: border-box;
             overflow: hidden;
             border-radius: 12px;
         }}
@@ -996,7 +1315,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0;
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             text-align: center;
         }}
         #mdb-panel .mdb-slide-4 .home-pie-wrap {{
@@ -1006,7 +1325,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 1352px;
+            width: 100%;
             max-width: 100%;
             padding-bottom: 42px; /* small footer space for two buttons */
             box-sizing: border-box;
@@ -1055,9 +1374,10 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             box-sizing: border-box;
             display: flex;
             flex-direction: column;
-            background: #fff;
+            background: var(--color-surface);
             border-radius: 12px;
-            padding: 24px;
+            padding-block: var(--space-8);
+            padding-inline: var(--space-6);
             box-shadow: 0 4px 20px rgba(0,0,0,0.08);
         }}
 
@@ -1066,7 +1386,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0 0 16px 0;
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             text-align: center;
         }}
 
@@ -1076,7 +1396,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             min-width: 0;
             margin-left: auto;
             margin-right: auto;
-            background: #fafafa;
+            background: var(--color-surface-muted);
             border-radius: 16px;
             overflow: hidden;
             box-sizing: border-box;
@@ -1124,7 +1444,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin-left: -50px;
             display: none;
             background: rgba(17, 24, 39, 0.92);
-            color: #fff;
+            color: var(--color-on-inverse);
             padding: 8px 12px;
             border-radius: 8px;
             font-size: 12px;
@@ -1214,7 +1534,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             grid-row: 1;
             width: 872px;
             height: 866px;
-            background: #fafafa;
+            background: var(--color-surface-muted);
             box-sizing: border-box;
         }}
 
@@ -1227,11 +1547,11 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .mdb-coocc-read-help {{
             font-size: 14px;
             line-height: 1.45;
-            color: #334155;
-            background: #f8fafc;
+            color: var(--color-ink-muted);
+            background: var(--color-surface-muted);
             padding: 12px 14px;
             border-radius: 8px;
-            border: 1px solid #e2e8f0;
+            border: 1px solid var(--color-border-muted);
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         }}
 
@@ -1248,7 +1568,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .mdb-coocc-legend-block .mdb-coocc-legend-label {{
             font-size: 14px;
             font-weight: 700;
-            color: #1e293b;
+            color: var(--color-ink);
         }}
 
         .mdb-coocc-legend-bar {{
@@ -1256,7 +1576,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             max-width: 276px;
             height: 20px;
             border-radius: 4px;
-            border: 1px solid #64748b;
+            border: 1px solid var(--color-ink-hint);
             background: linear-gradient(to right, #E8E8EC 0%, #8A8A8A 50%, #2F2F35 100%);
             box-sizing: border-box;
         }}
@@ -1264,7 +1584,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .mdb-coocc-legend-values {{
             font-size: 14px;
             font-weight: 700;
-            color: #374151;
+            color: var(--color-ink-muted);
             display: flex;
             justify-content: space-between;
             width: 100%;
@@ -1302,7 +1622,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             pointer-events: none;
             display: none;
             background: rgba(17, 24, 39, 0.92);
-            color: #fff;
+            color: var(--color-on-inverse);
             padding: 8px 12px;
             border-radius: 8px;
             font-size: 12px;
@@ -1320,7 +1640,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             position: absolute;
             display: none;
             background: rgba(17, 24, 39, 0.94);
-            color: #fff;
+            color: var(--color-on-inverse);
             padding: 10px 14px;
             border-radius: 8px;
             font-size: 12px;
@@ -1429,29 +1749,30 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             box-sizing: border-box;
             display: flex;
             flex-direction: column;
-            background: #fff;
+            background: var(--color-surface);
             border-radius: 12px;
-            padding: 24px;
+            padding-block: var(--space-8);
+            padding-inline: var(--space-6);
             box-shadow: 0 4px 20px rgba(0,0,0,0.08);
         }}
 
         /* 标题字号与 Explore by Country 页面一致（以 Country 为参考） */
         .chart-wrapper .chart-title {{
             flex-shrink: 0;
-            margin: 0 0 16px 0;
+            margin: 0 0 var(--space-4) 0;
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             text-align: center;
+            text-wrap: balance;
         }}
 
-        /* 绘图区域固定宽度：1400px，高度由 wrapper 剩余空间填充 */
         .chart-wrapper .chart-container {{
             position: relative;
             flex: 1;
-            min-height: 0;
-            width: 1400px;
-            background: #fafafa;
+            min-height: var(--layout-chart-min-height);
+            width: 100%;
+            background: var(--color-surface-muted);
             overflow: hidden;
             border-radius: 16px;
         }}
@@ -1497,7 +1818,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             padding: 6px 10px;
             border-radius: 4px;
             background: rgba(17, 24, 39, 0.94);
-            color: #f9fafb;
+            color: var(--color-on-sidebar);
             font-size: 12px;
             font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
             white-space: nowrap;
@@ -1548,7 +1869,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             cursor: pointer;
         }}
         #country-panel .map-wrapper .map-sdg-logo-wrap.selected {{
-            outline: 2px solid #2563eb;
+            outline: 2px solid var(--color-accent-strong);
             outline-offset: 2px;
             border-radius: 4px;
         }}
@@ -1559,7 +1880,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .year-slider-label {{
             font-size: 14px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             margin-bottom: 6px;
         }}
         .year-slider-ticks span {{
@@ -1570,7 +1891,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             cursor: pointer;
         }}
         .year-range-label-reset:hover {{
-            color: #2563eb;
+            color: var(--color-accent-strong);
         }}
 
         .year-slider-track {{
@@ -1587,7 +1908,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             transform: translateY(-50%);
             height: 4px;
             border-radius: 999px;
-            background: #e5e7eb;
+            background: var(--color-divider);
         }}
 
         .year-slider-range {{
@@ -1596,7 +1917,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             transform: translateY(-50%);
             height: 4px;
             border-radius: 999px;
-            background: linear-gradient(90deg, #2563eb, #16a34a);
+            background: linear-gradient(90deg, var(--color-accent-strong), var(--color-metric-amount));
         }}
 
         .year-slider-handle {{
@@ -1606,8 +1927,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             width: 16px;
             height: 16px;
             border-radius: 50%;
-            background: #ffffff;
-            border: 2px solid #2563eb;
+            background: var(--color-surface);
+            border: 2px solid var(--color-accent-strong);
             box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
             cursor: pointer;
         }}
@@ -1626,7 +1947,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             justify-content: space-between;
             font-size: 12px;
             font-weight: 600;
-            color: #111827;
+            color: var(--color-ink);
         }}
 
         .number-panel {{
@@ -1647,51 +1968,219 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .number-display {{
             font-size: 160px;
             font-weight: 800;
-            color: #111827;
+            color: var(--color-ink);
             text-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
         }}
 
         /* 多视图面板：Home / MDB / Country / About */
+        @keyframes view-panel-enter {{
+            from {{
+                opacity: 0.96;
+                transform: translateY(3px);
+            }}
+            to {{
+                opacity: 1;
+                transform: translateY(0);
+            }}
+        }}
         .view-panel {{
             display: none;
             flex: 1;
             flex-direction: column;
             min-width: 0;
-            background-color: #f5f5f7;
+            width: 100%;
+            background-color: var(--color-bg);
             padding: 24px 0;
             box-sizing: border-box;
-            align-items: center;
-            justify-content: center;
+            align-items: stretch;
+            justify-content: flex-start;
         }}
         .view-panel.active {{
             display: flex;
+            animation: view-panel-enter var(--duration-normal) var(--ease-out-quint);
         }}
         #home-panel {{
-            align-items: flex-end;
+            align-items: stretch;
         }}
         .home-right-wrapper {{
-            width: 1400px;
-            min-width: 1400px;
-            height: 1100px;
-            margin: -10px 0 0 auto;
+            width: 100%;
+            min-width: 0;
+            min-height: 1100px;
+            height: auto;
+            margin: var(--layout-chart-nudge) 0 0 0;
             display: flex;
             flex-direction: column;
-            background: #fff;
-            border-radius: 12px;
-            padding: 0 24px 0 24px;
             box-sizing: border-box;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            gap: var(--space-6);
         }}
-        .home-chart-row {{
+
+        .home-intro-section {{
+            display: none;
+            flex-shrink: 0;
+            width: 100%;
+            box-sizing: border-box;
+            padding-bottom: var(--space-4);
+            border-bottom: 1px solid var(--color-divider);
+            overflow: hidden;
+            transition: opacity var(--duration-normal) var(--ease-out),
+                        max-height var(--duration-expand) var(--ease-out-quint),
+                        padding-bottom var(--duration-normal) var(--ease-out),
+                        border-bottom-color var(--duration-normal) var(--ease-out);
+        }}
+        .main-row:has(#home-panel.active) .home-intro-section:not(.is-collapsed) {{
+            display: block;
+            opacity: 1;
+            max-height: 720px;
+        }}
+
+        .home-intro-details {{
+            margin: 0;
+        }}
+
+        .home-intro-summary {{
+            list-style: none;
+            cursor: default;
+            padding: 0;
+            margin: 0;
+        }}
+
+        .home-intro-summary::-webkit-details-marker {{
+            display: none;
+        }}
+
+        .home-intro-summary::marker {{
+            content: "";
+        }}
+
+        .home-intro-body {{
+            padding-top: var(--space-3);
+        }}
+
+        .home-intro-body-inner {{
+            min-height: 0;
+            overflow: hidden;
+        }}
+
+        .home-intro-chevron {{
+            display: none;
+            flex-shrink: 0;
+            width: 20px;
+            height: 20px;
+            color: var(--color-ink-subtle);
+            transition: transform var(--duration-normal) var(--ease-out-quint);
+        }}
+
+        .home-intro-details[open] .home-intro-chevron {{
+            transform: rotate(180deg);
+        }}
+
+        @media (prefers-reduced-motion: reduce) {{
+            .home-intro-chevron {{
+                transition: none;
+            }}
+        }}
+
+        .chart-stage {{
+            display: flex;
+            flex-direction: column;
+            gap: var(--space-4);
+            min-width: 0;
             flex: 1;
             min-height: 0;
+        }}
+
+        .chart-stage-viewport {{
+            position: relative;
+            min-width: var(--layout-chart-min);
+            min-height: var(--layout-chart-stage-min-height);
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }}
+
+        .chart-stage-row {{
+            flex: 1;
+            min-height: var(--layout-chart-stage-min-height);
+            margin-left: 0;
+            margin-right: 0;
+        }}
+
+        .chart-nav {{
+            display: flex;
+            align-items: stretch;
+            flex-shrink: 0;
+            border-bottom: 1px solid var(--color-divider);
+        }}
+
+        .chart-nav-track {{
+            display: flex;
+            flex: 1;
+            min-width: 0;
+            gap: 0;
+            overflow-x: auto;
+            overscroll-behavior-x: contain;
+            -webkit-overflow-scrolling: touch;
+            scroll-snap-type: x proximity;
+            scrollbar-width: none;
+        }}
+
+        .chart-nav-track::-webkit-scrollbar {{
+            display: none;
+        }}
+
+        .chart-nav-tab {{
+            flex: 0 0 auto;
+            scroll-snap-align: start;
+            min-height: 44px;
+            padding: var(--space-3) var(--space-4);
+            margin-bottom: -1px;
+            border: none;
+            border-bottom: 2px solid transparent;
+            border-radius: 0;
+            background: transparent;
+            color: var(--color-ink-subtle);
+            font-size: 13px;
+            font-weight: 500;
+            font-family: inherit;
+            line-height: 1.25;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: color var(--duration-fast) var(--ease-out),
+                        border-color var(--duration-fast) var(--ease-out);
+        }}
+
+        .chart-nav-tab:hover {{
+            color: var(--color-ink);
+        }}
+
+        .chart-nav-tab[aria-selected="true"] {{
+            color: var(--color-accent);
+            border-bottom-color: var(--color-accent);
+            font-weight: 600;
+        }}
+
+        .chart-nav-tab:disabled {{
+            opacity: 0.4;
+            cursor: not-allowed;
+        }}
+
+        .home-arrow,
+        .mdb-arrow,
+        .country-arrow {{
+            display: none !important;
+        }}
+
+        .home-chart-row {{
             display: flex;
             align-items: stretch;
             position: relative;
-            width: 1400px;
-            min-width: 1400px;
-            margin-left: -24px;
-            margin-right: -24px;
+            width: 100%;
+            min-width: 0;
+            flex: 1;
+            min-height: 0;
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }}
         .home-arrow {{
             position: absolute;
@@ -1700,7 +2189,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             border-radius: 50%;
             border: none;
             background: rgba(107, 114, 128, 0.35);
-            color: #fff;
+            color: var(--color-on-inverse);
             cursor: pointer;
             display: none;
             align-items: center;
@@ -1717,13 +2206,14 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .home-arrow-icon {{ display: flex; align-items: center; justify-content: center; }}
         .home-arrow-icon svg {{ display: block; }}
         .home-arrow-left {{
-            left: -75px;
+            left: var(--space-3);
             top: 50%;
             transform: translateY(-50%);
         }}
         .home-arrow-left.visible {{ display: flex; }}
         .home-arrow-right {{
-            left: calc(100% + 25px);
+            right: var(--space-3);
+            left: auto;
             top: 50%;
             transform: translateY(-50%);
         }}
@@ -1732,61 +2222,47 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .home-arrow-right:hover {{ transform: translateY(-50%) scale(1.05); }}
         .home-slider-wrapper {{
             flex: 1;
-            width: 1400px;
-            min-width: 1400px;
+            width: 100%;
+            min-width: var(--layout-chart-min);
+            min-height: var(--layout-chart-stage-min-height);
             overflow: hidden;
             position: relative;
             border-radius: 12px;
+            background: var(--color-surface-muted);
+            border: 1px solid var(--color-divider);
+            padding-block: var(--space-4);
+            box-sizing: border-box;
         }}
         .home-slider {{
             display: flex;
             height: 100%;
-            width: 7000px;
-            transition: transform 0.4s ease;
+            width: 100%;
+            transition: transform 0.4s var(--ease-out);
         }}
-        .home-slider.slide-2 {{
-            transform: translateX(-1400px);
-        }}
-        .home-slider.slide-3 {{
-            transform: translateX(-2800px);
-        }}
-        .home-slider.slide-4 {{
-            transform: translateX(-4200px);
-        }}
-        .home-slider.slide-5 {{
-            transform: translateX(-5600px);
-        }}
-        .home-slide-1 {{
-            width: 1400px;
+        .home-slide-1,
+        .home-slide-2,
+        .home-slide-3,
+        .home-slide-4,
+        .home-slide-5 {{
+            flex: 0 0 100%;
+            width: 100%;
+            min-width: 0;
             flex-shrink: 0;
             height: 100%;
             display: flex;
             flex-direction: column;
             min-height: 0;
+            box-sizing: border-box;
         }}
         .home-slide-2 {{
-            width: 1400px;
-            flex-shrink: 0;
-            height: 100%;
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
             padding: 0 24px 0 24px;
-            box-sizing: border-box;
             overflow: hidden;
             border-radius: 12px;
         }}
         .home-slide-3,
         .home-slide-4,
         .home-slide-5 {{
-            width: 1400px;
-            flex-shrink: 0;
-            height: 100%;
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
             padding: 0 24px 0 24px;
-            box-sizing: border-box;
             overflow: hidden;
             border-radius: 12px;
         }}
@@ -1813,7 +2289,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
         #home-pointer-year-ticks span.active {{
             opacity: 1;
-            color: #2563eb;
+            color: var(--color-accent-strong);
         }}
         .home-slide-2 .home-pie-title-area,
         .home-slide-3 .home-pie-title-area,
@@ -1833,21 +2309,21 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0;
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             text-align: center;
         }}
         .home-slide-2 .home-pie-wrap {{
-            background: #fafafa;
+            background: var(--color-surface-muted);
             border-radius: 12px;
         }}
         .home-pie-wrap {{
             flex: 1;
-            min-height: 0;
+            min-height: var(--layout-chart-min-height);
             position: relative;
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 1352px;
+            width: 100%;
             max-width: 100%;
             box-sizing: border-box;
         }}
@@ -1880,12 +2356,12 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .home-pie-center-total {{
             font-size: 38px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             display: block;
         }}
         .home-pie-center-hint {{
             font-size: 18px;
-            color: #6b7280;
+            color: var(--color-ink-hint);
             margin-top: 6px;
         }}
         #home-chord-center-label.home-pie-center-label {{
@@ -1907,7 +2383,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             padding: 8px 12px;
             border-radius: 6px;
             background: rgba(17,24,39,0.92);
-            color: #f9fafb;
+            color: var(--color-on-sidebar);
             font-size: 12px;
             pointer-events: none;
             display: none;
@@ -1922,10 +2398,11 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
         .home-welcome-block {{
             flex-shrink: 0;
-            min-height: 200px;
-            margin-top: 16px;
-            padding: 0 24px;
+            width: 100%;
+            margin-top: 0;
+            padding: 0;
             box-sizing: border-box;
+            background: transparent;
         }}
         .home-welcome-block.hidden {{
             display: none;
@@ -1938,8 +2415,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .home-welcome-first-line {{
             font-size: 22px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             line-height: 1.4;
+            text-wrap: balance;
         }}
         .home-sdg-wheel-img {{
             height: 1.4em;
@@ -1968,44 +2446,47 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
         .home-welcome-text {{
             margin: 0;
+            width: 100%;
+            max-width: none;
             font-size: 18px;
             line-height: 1.7;
-            color: #374151;
-            max-width: 100%;
+            color: var(--color-ink-muted);
+            background: transparent;
+            text-wrap: pretty;
         }}
         .home-welcome-text br {{
             line-height: 0.5;
             font-size: 8px;
         }}
         .home-welcome-text .home-term {{
-            color: #1d4ed8;
+            color: var(--color-accent);
             font-weight: 700;
         }}
         .home-welcome-text .home-link {{
-            color: #2563eb;
+            color: var(--color-accent-strong);
             font-weight: 600;
             text-decoration: none;
             border-bottom: 1px solid rgba(37,99,235,0.4);
             cursor: pointer;
         }}
         .home-welcome-text .home-link:hover {{
-            border-bottom-color: #2563eb;
+            border-bottom-color: var(--color-accent-strong);
         }}
         .home-chart-area {{
-            flex-shrink: 0;
-            width: 1352px;
-            height: 670px;
+            flex: 1;
+            width: 100%;
+            max-width: 100%;
+            min-height: var(--layout-chart-min-height);
+            height: auto;
             display: flex;
             flex-direction: column;
-            background: #fafafa;
+            background: transparent;
             border-radius: 12px;
-            margin-top: 16px;
-            margin-left: auto;
-            margin-right: auto;
+            margin: 0;
             box-sizing: border-box;
         }}
         .home-chart-area.expanded {{
-            height: 870px;
+            min-height: calc(var(--layout-chart-min-height) + 200px);
         }}
         .home-chart-title-area {{
             flex-shrink: 0;
@@ -2014,24 +2495,25 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             align-items: center;
             justify-content: center;
             padding: 0 8px;
-            background: #fff;
+            background: var(--color-surface);
         }}
         .home-chart-title {{
             margin: 0;
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             text-align: center;
+            text-wrap: balance;
         }}
         .home-stack-chart-wrap {{
-            flex-shrink: 0;
-            width: 1352px;
-            height: 630px;
+            flex: 1;
+            width: 100%;
+            max-width: 100%;
+            min-height: calc(var(--layout-chart-min-height) - 48px);
+            height: auto;
             position: relative;
             box-sizing: border-box;
-        }}
-        .home-chart-area.expanded .home-stack-chart-wrap {{
-            height: 830px;
+            background: var(--color-surface);
         }}
         #home-stack-canvas {{
             display: block;
@@ -2040,42 +2522,50 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
         .home-legend-and-totals {{
             display: flex;
-            width: 1352px;
+            width: 100%;
+            max-width: 100%;
             min-height: 118px;
             align-items: stretch;
             flex-shrink: 0;
-            margin-top: 15px;
-            margin-bottom: 25px;
-            gap: 30px;
+            margin-top: var(--space-4);
+            margin-bottom: var(--space-6);
+            gap: var(--space-8);
             box-sizing: border-box;
+        }}
+        .home-sdg-legend-wrap {{
+            flex: 1;
+            min-width: 0;
+            container-type: inline-size;
+            container-name: home-sdg-legend;
         }}
         .home-sdg-legend {{
-            flex-shrink: 0;
-            width: 1132px;
+            width: 100%;
             min-height: 110px;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: flex-start;
-            gap: 14px;
+            display: grid;
+            grid-template-columns: repeat(9, minmax(0, 1fr));
+            gap: var(--space-3) var(--space-5);
+            align-items: center;
+            justify-items: center;
             padding: 0;
-            background: #fff;
             box-sizing: border-box;
         }}
+        @container home-sdg-legend (max-width: 719px) {{
+            .home-sdg-legend {{
+                grid-template-columns: repeat(6, minmax(0, 1fr));
+                gap: var(--space-3);
+            }}
+        }}
+        @container home-sdg-legend (max-width: 479px) {{
+            .home-sdg-legend {{
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }}
+        }}
         .home-sdg-legend-row {{
-            display: flex;
-            justify-content: flex-start;
-            align-items: center;
-            gap: 20px;
-        }}
-        .home-sdg-legend-row:first-child {{
-            width: 100%;
-        }}
-        .home-sdg-legend-row:last-child {{
-            justify-content: flex-start;
+            display: contents;
         }}
         .home-sdg-legend-item.home-sdg-legend-e-logo {{
-            width: 108px;
+            width: 100%;
+            max-width: 108px;
             height: 48px;
         }}
         .home-sdg-legend-item.home-sdg-legend-e-logo img {{
@@ -2085,8 +2575,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             object-fit: contain;
         }}
         .home-totals-block-wrap {{
-            flex-shrink: 0;
-            width: calc(1352px - 1132px - 30px);
+            flex: 0 0 min(190px, 28%);
+            width: auto;
+            min-width: 148px;
             padding: 3px;
             border-radius: 12px;
             background: var(--home-totals-border-gradient);
@@ -2095,7 +2586,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .home-totals-block {{
             min-width: 0;
             padding: 2px;
-            background: #fff;
+            background: var(--color-surface);
             border-radius: 10px;
             box-sizing: border-box;
             height: 100%;
@@ -2107,7 +2598,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .home-totals-projects, .home-totals-amount {{
             font-size: 16px;
             font-weight: 600;
-            color: #111827;
+            color: var(--color-ink);
             line-height: 1.5;
             margin: 0;
         }}
@@ -2116,22 +2607,24 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             font-weight: 700;
         }}
         .home-sdg-legend-item {{
-            width: 108px;
+            width: 100%;
+            max-width: 108px;
             height: 48px;
             display: flex;
             align-items: center;
             justify-content: center;
             cursor: pointer;
+            border-radius: 4px;
+            transition: outline-color var(--duration-fast) var(--ease-out),
+                        outline-offset var(--duration-fast) var(--ease-out);
         }}
         .home-sdg-legend-item.selected {{
-            outline: 2px solid #2563eb;
+            outline: 2px solid var(--color-accent);
             outline-offset: 2px;
-            border-radius: 4px;
         }}
         .home-sdg-legend-item.chord-selected {{
-            outline: 2px solid #0f766e;
+            outline: 2px solid var(--color-focus-map);
             outline-offset: 2px;
-            border-radius: 4px;
         }}
         #home-chord-layout-btn {{
             right: 14px;
@@ -2152,7 +2645,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             padding: 8px 12px;
             border-radius: 6px;
             background: rgba(17,24,39,0.92);
-            color: #f9fafb;
+            color: var(--color-on-sidebar);
             font-size: 12px;
             pointer-events: none;
             display: none;
@@ -2160,12 +2653,21 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             box-shadow: 0 2px 8px rgba(0,0,0,0.2);
         }}
         #country-panel {{
-            align-items: flex-end;
+            align-items: stretch;
         }}
         .country-map-row {{
             display: flex;
             align-items: center;
-            margin: -10px 0 0 0;
+            width: 100%;
+            min-width: 0;
+            margin: var(--layout-chart-nudge) 0 0 0;
+            position: relative;
+        }}
+        .country-map-outer {{
+            position: relative;
+            flex: 1;
+            min-width: 0;
+            width: 100%;
         }}
         .country-arrow {{
             position: absolute;
@@ -2174,7 +2676,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             border-radius: 50%;
             border: none;
             background: rgba(107, 114, 128, 0.35);
-            color: #fff;
+            color: var(--color-on-inverse);
             cursor: pointer;
             display: none;
             align-items: center;
@@ -2196,7 +2698,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             display: block;
         }}
         .country-arrow-left {{
-            left: -75px;
+            left: var(--space-3);
             top: 50%;
             transform: translateY(-50%);
         }}
@@ -2204,7 +2706,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             display: flex;
         }}
         .country-arrow-right {{
-            left: calc(100% + 25px);
+            right: var(--space-3);
+            left: auto;
             top: 50%;
             transform: translateY(-50%);
         }}
@@ -2223,13 +2726,10 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         .country-arrow-right:active {{
             transform: translateY(-50%) scale(0.98);
         }}
-        .country-map-outer {{
-            position: relative;
-        }}
         /* padding-top 补偿 map-wrapper margin-top:-10px，避免上边两倒角被裁切；圆角与 map-wrapper 一致；高度 1110 以容纳 padding 后内容区仍 1100 */
         .country-map-content {{
-            width: 1400px;
-            min-width: 1400px;
+            width: 100%;
+            min-width: 0;
             height: 1110px;
             min-height: 1110px;
             overflow: hidden;
@@ -2240,44 +2740,26 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
         .country-map-slider {{
             display: flex;
-            width: 4200px;
-            transition: transform 0.4s ease;
-        }}
-        .country-map-slider.slide-2 {{
-            transform: translateX(-1400px);
-        }}
-        .country-map-slider.slide-3 {{
-            transform: translateX(-2800px);
+            width: 100%;
+            height: 100%;
+            transition: transform 0.4s var(--ease-out);
         }}
         #country-panel .map-wrapper .country-map-slider {{
             flex: 1;
             min-height: 0;
-            width: 4200px;
             flex-shrink: 0;
         }}
-        .country-slide-1 {{
-            display: flex;
-            flex-direction: column;
-            width: 1400px;
-            min-width: 1400px;
-            flex-shrink: 0;
-            height: 100%;
-        }}
-        .country-slide-2 {{
-            display: flex;
-            flex-direction: column;
-            width: 1400px;
-            min-width: 1400px;
-            flex-shrink: 0;
-            height: 100%;
-        }}
+        .country-slide-1,
+        .country-slide-2,
         .country-slide-3 {{
             display: flex;
             flex-direction: column;
-            width: 1400px;
-            min-width: 1400px;
+            flex: 0 0 100%;
+            width: 100%;
+            min-width: 0;
             flex-shrink: 0;
             height: 100%;
+            box-sizing: border-box;
         }}
         .country-radar-chart-title {{
             display: flex;
@@ -2291,7 +2773,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0;
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
         }}
         .country-slide-2 .chart-container {{
             position: relative;
@@ -2301,7 +2783,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0 auto;
             border-radius: 12px;
             overflow: hidden;
-            background: #fafafa;
+            background: var(--color-surface-muted);
             box-sizing: border-box;
         }}
         .country-slide-3 .chart-container {{
@@ -2312,7 +2794,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0 auto;
             border-radius: 12px;
             overflow: hidden;
-            background: #fafafa;
+            background: var(--color-surface-muted);
             box-sizing: border-box;
         }}
         .country-radar-wrap {{
@@ -2348,7 +2830,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0;
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
         }}
         .barchart-container {{
             position: relative;
@@ -2358,7 +2840,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0 auto;
             border-radius: 12px;
             overflow: hidden;
-            background: #fafafa;
+            background: var(--color-surface-muted);
             box-sizing: border-box;
         }}
         #country-barchart-canvas {{
@@ -2371,7 +2853,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             padding: 8px 12px;
             border-radius: 6px;
             background: rgba(17,24,39,0.92);
-            color: #f9fafb;
+            color: var(--color-on-sidebar);
             font-size: 12px;
             pointer-events: none;
             display: none;
@@ -2384,7 +2866,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             padding: 8px 12px;
             border-radius: 6px;
             background: rgba(17,24,39,0.92);
-            color: #f9fafb;
+            color: var(--color-on-sidebar);
             font-size: 12px;
             pointer-events: none;
             display: none;
@@ -2393,37 +2875,32 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }}
         #country-panel .map-wrapper path.country.selected {{
-            stroke: #1d4ed8;
+            stroke: var(--color-accent);
             stroke-width: 2.5px;
         }}
         .view-panel.plain {{
-            padding: 48px 24px;
+            padding: var(--space-12) var(--space-6);
             text-align: center;
-        }}
-        #about-panel {{
-            align-self: stretch;
-            justify-content: flex-start;
-            padding-top: 80px;
         }}
         .view-panel.plain .maintenance {{
             font-size: 24px;
             font-weight: 600;
-            color: #6b7280;
+            color: var(--color-ink-hint);
         }}
         .view-panel.plain .about-block {{
             font-size: 18px;
-            color: #374151;
+            color: var(--color-ink-muted);
             line-height: 1.8;
         }}
         .about-acknowledgement {{
-            max-width: 720px;
+            max-width: 72ch;
             margin: 0 auto;
             text-align: left;
         }}
         .about-acknowledgement h2 {{
             font-size: 22px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
             margin: 0 0 16px 0;
         }}
         .about-acknowledgement-body {{
@@ -2436,32 +2913,42 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin-bottom: 0;
         }}
         .about-acknowledgement-body a {{
-            color: #2563eb;
+            color: var(--color-accent-strong);
             font-weight: 600;
             text-decoration: none;
             border-bottom: 1px solid rgba(37,99,235,0.4);
         }}
         .about-acknowledgement-body a:hover {{
-            border-bottom-color: #2563eb;
+            border-bottom-color: var(--color-accent-strong);
         }}
         .about-signature {{
             margin-top: 24px;
             font-weight: 600;
-            color: #111827;
+            color: var(--color-ink);
         }}
         .about-signature .about-date {{
             font-weight: 400;
-            color: #6b7280;
+            color: var(--color-ink-hint);
         }}
         .main-row.hide-sidebar .sidebar {{
             display: none;
         }}
-        .main-row .content-views {{
+        .main-row-body .content-views {{
             flex: 1;
             display: flex;
             flex-direction: column;
             min-width: 0;
-            align-items: flex-end;
+            width: 100%;
+            align-items: stretch;
+            overflow-x: clip;
+        }}
+
+        #about-panel {{
+            align-self: stretch;
+            justify-content: flex-start;
+            padding-top: var(--space-16);
+            width: 100%;
+            align-items: center;
         }}
 
         /* Bar chart 画布内返回按钮（单 MDB 时显示） */
@@ -2475,9 +2962,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             gap: 6px;
             padding: 8px 14px;
             border-radius: 8px;
-            border: 1px solid #d1d5db;
-            background: #fff;
-            color: #374151;
+            border: 1px solid var(--color-border-muted);
+            background: var(--color-surface);
+            color: var(--color-ink-muted);
             font-size: 13px;
             font-weight: 600;
             cursor: pointer;
@@ -2492,7 +2979,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             bottom: 72px;
         }}
         .chart-back-btn:hover {{
-            background: #f3f4f6;
+            background: var(--color-surface-hover);
             box-shadow: 0 4px 12px rgba(0,0,0,0.12);
         }}
         .chart-back-btn-icon, .country-back-btn-icon {{
@@ -2525,19 +3012,19 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         #country-panel .map-legend-label {{
             font-size: 14px;
             font-weight: 700;
-            color: #1e293b;
+            color: var(--color-ink);
         }}
         #country-panel .map-legend-bar {{
             width: 220px;
             height: 20px;
             border-radius: 4px;
-            border: 1px solid #64748b;
+            border: 1px solid var(--color-ink-hint);
             background: linear-gradient(to right, #E8E8EC, #8A8A8A, #2F2F35);
         }}
         #country-panel .map-legend-values {{
             font-size: 14px;
             font-weight: 700;
-            color: #374151;
+            color: var(--color-ink-muted);
             display: flex;
             justify-content: space-between;
             width: 220px;
@@ -2548,10 +3035,10 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             gap: 3px;
             padding: 8px 10px;
             background: rgba(255, 255, 255, 0.96);
-            border: 1px solid #cbd5e1;
+            border: 1px solid var(--color-border-muted);
             border-radius: 6px;
             font-size: 11px;
-            color: #334155;
+            color: var(--color-ink-muted);
             box-sizing: border-box;
         }}
         /* Fig. 6 alignment map only — leftmost country slider (slide -1) */
@@ -2585,7 +3072,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             font-weight: 700;
         }}
         #country-panel .map-overlay-panel.cosine-legend-mode .map-income-swatch {{
-            background: #fff !important;
+            background: var(--color-surface) !important;
             border-width: 2px;
             border-style: solid;
             border-color: #bdbdbd;
@@ -2598,7 +3085,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         #country-panel .map-income-legend-title {{
             font-weight: 700;
             font-size: 13px;
-            color: #1e293b;
+            color: var(--color-ink);
             margin-bottom: 2px;
         }}
         #country-panel .map-income-legend-row {{
@@ -2619,9 +3106,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             align-items: center;
             padding: 8px 14px;
             border-radius: 8px;
-            border: 1px solid #d1d5db;
-            background: #fff;
-            color: #374151;
+            border: 1px solid var(--color-border-muted);
+            background: var(--color-surface);
+            color: var(--color-ink-muted);
             font-size: 13px;
             font-weight: 600;
             cursor: pointer;
@@ -2631,20 +3118,20 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             display: flex;
         }}
         #country-panel .country-back-btn:hover {{
-            background: #f3f4f6;
+            background: var(--color-surface-hover);
             box-shadow: 0 4px 12px rgba(0,0,0,0.12);
         }}
 
         /* 与 chart-wrapper、sidebar 统一高度 1100px；定值纵向与左侧 MDB 栏对齐：margin-top -10px（手动调此处）；右对齐与 nav 灰线右端 */
         #country-panel .map-wrapper {{
-            background: #fff;
+            background: var(--color-surface);
             border-radius: 12px;
-            padding: 0 0 24px 0;
+            padding: var(--space-4) 0 var(--space-6);
             box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            width: 1400px;
-            min-width: 1400px;
+            width: 100%;
+            min-width: 0;
             height: 1100px;
-            margin: -10px 0 0 auto;
+            margin: 0;
             box-sizing: border-box;
             overflow: hidden;
             display: flex;
@@ -2663,32 +3150,32 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             margin: 0;
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: var(--color-ink);
         }}
         .country-map-title-hint {{
             font-size: 12px;
-            color: #9ca3af;
+            color: var(--color-ink-hint);
         }}
         #country-panel .map-container {{
             position: relative;
-            width: 1400px;
-            min-width: 1400px;
+            width: 100%;
+            min-width: 0;
             height: 700px;
             margin: 0 auto;
             border-radius: 12px;
             overflow: hidden;
-            background: #fff;
+            background: var(--color-surface);
             box-sizing: border-box;
         }}
         #country-panel #country-map {{
-            width: 1400px;
-            height: 700px;
+            width: 100%;
+            height: 100%;
         }}
         #country-map-svg {{
             display: block;
-            width: 1400px;
-            height: 700px;
-            background: #fff;
+            width: 100%;
+            height: 100%;
+            background: var(--color-surface);
         }}
         #country-panel .map-metric-switch, .home-pie-wrap .map-metric-switch {{
             display: flex;
@@ -2700,12 +3187,12 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             padding: 8px 14px;
             border-radius: 999px;
             box-shadow: 0 2px 12px rgba(0,0,0,0.12);
-            border: 1px solid #e5e7eb;
+            border: 1px solid var(--color-divider);
         }}
         #country-panel .map-metric-switch .map-metric-label, .home-pie-wrap .map-metric-switch .map-metric-label {{
             font-size: 13px;
             font-weight: 600;
-            color: #6b7280;
+            color: var(--color-ink-subtle);
             white-space: nowrap;
             padding: 4px 8px;
             border-radius: 6px;
@@ -2713,26 +3200,26 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             transition: border-color 0.2s, color 0.2s, box-shadow 0.2s;
         }}
         #country-panel .map-metric-switch .map-metric-label.active, .home-pie-wrap .map-metric-switch .map-metric-label.active {{
-            color: #1d4ed8;
-            border-color: #2563eb;
-            box-shadow: 0 0 0 1px rgba(37,99,235,0.3);
+            color: var(--color-accent);
+            border-color: var(--color-accent-strong);
+            box-shadow: 0 0 0 1px color-mix(in oklch, var(--color-accent-strong) 30%, transparent);
         }}
         #country-panel .map-metric-switch .switch-track, .home-pie-wrap .map-metric-switch .switch-track {{
             flex-shrink: 0;
             width: 48px;
             height: 26px;
             border-radius: 999px;
-            background: #d1d5db;
+            background: var(--color-switch-track);
             cursor: pointer;
             position: relative;
-            transition: border-color 0.2s;
-            border: 1px solid #9ca3af;
+            transition: background var(--duration-fast), border-color var(--duration-fast);
+            border: 1px solid var(--color-border);
         }}
         #country-panel .map-metric-switch .switch-track:hover, .home-pie-wrap .map-metric-switch .switch-track:hover {{
-            background: #b8bcc4;
+            background: var(--color-switch-track-hover);
         }}
         #country-panel .map-metric-switch .switch-track.on, .home-pie-wrap .map-metric-switch .switch-track.on {{
-            border-color: #9ca3af;
+            border-color: var(--color-border);
         }}
         #country-panel .map-metric-switch .switch-thumb, .home-pie-wrap .map-metric-switch .switch-thumb {{
             position: absolute;
@@ -2741,7 +3228,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             width: 20px;
             height: 20px;
             border-radius: 50%;
-            background: #fff;
+            background: var(--color-surface);
             box-shadow: 0 2px 4px rgba(0,0,0,0.25);
             transition: transform 0.2s ease;
             pointer-events: none;
@@ -2759,7 +3246,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             bottom: 12px;
             padding: 12px;
             background: rgba(17,24,39,0.9);
-            color: #f9fafb;
+            color: var(--color-on-sidebar);
             font-size: 13px;
             border-radius: 8px;
             display: none;
@@ -2773,15 +3260,634 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             padding: 8px 12px;
             border-radius: 6px;
             background: rgba(17, 24, 39, 0.94);
-            color: #f9fafb;
+            color: var(--color-on-sidebar);
             font-size: 12px;
             font-family: "Segoe UI", sans-serif;
             line-height: 1.5;
             white-space: nowrap;
             pointer-events: none;
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-            z-index: 20;
+            z-index: var(--z-tooltip);
             display: none;
+        }}
+
+        @media (max-width: 1200px) {{
+            html,
+            body,
+            .page {{
+                overflow-x: clip;
+                max-width: 100%;
+            }}
+            .main-row-body {{
+                flex-direction: column;
+                align-items: stretch;
+                gap: var(--space-4);
+            }}
+            .sidebar {{
+                width: 100%;
+                flex: 0 0 auto;
+                height: auto;
+                min-height: 0;
+            }}
+            .buttons-wrapper {{
+                flex-direction: row;
+                flex-wrap: wrap;
+                justify-content: center;
+                gap: var(--space-1);
+                padding-block: var(--space-2);
+            }}
+            .mdb-button {{
+                width: calc(25% - var(--space-1));
+                max-width: 180px;
+                max-height: 68px;
+            }}
+            .main-row-body .content-views {{
+                align-items: stretch;
+                width: 100%;
+                overflow-x: clip;
+            }}
+            .view-panel {{
+                align-items: stretch;
+                width: 100%;
+                padding: var(--space-4) 0;
+            }}
+            #home-panel,
+            #mdb-panel,
+            #country-panel {{
+                align-items: stretch;
+                width: 100%;
+            }}
+            .home-right-wrapper {{
+                width: 100%;
+                min-width: 0;
+                max-width: 100%;
+                margin-left: 0;
+                margin-right: 0;
+                box-sizing: border-box;
+            }}
+            .charts-panel {{
+                align-items: stretch;
+                width: 100%;
+            }}
+            .home-chart-row,
+            .mdb-chart-row,
+            .country-map-row {{
+                width: 100%;
+                min-width: 0;
+                margin: 0;
+                padding: 0;
+                overflow-x: clip;
+            }}
+            .home-legend-and-totals {{
+                width: 100%;
+                max-width: 100%;
+                flex-direction: column;
+                align-items: stretch;
+                gap: var(--space-4);
+            }}
+            .home-sdg-legend-wrap {{
+                width: 100%;
+            }}
+            .home-totals-block-wrap {{
+                width: 100%;
+                align-self: stretch;
+            }}
+            .home-arrow-left,
+            .mdb-arrow-left,
+            .country-arrow-left {{
+                left: var(--space-2);
+            }}
+            .home-arrow-right,
+            .mdb-arrow-right,
+            .country-arrow-right {{
+                left: auto;
+                right: var(--space-2);
+            }}
+            .home-intro-section {{
+                padding-bottom: 0;
+                border-bottom: none;
+            }}
+            .home-intro-details {{
+                border: 1px solid var(--color-divider);
+                border-radius: var(--space-3);
+                background: var(--color-surface);
+                overflow: hidden;
+            }}
+            .home-intro-summary {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: var(--space-3);
+                min-height: 44px;
+                padding: var(--space-3) var(--space-4);
+                cursor: pointer;
+                -webkit-tap-highlight-color: transparent;
+                transition: background var(--duration-fast) var(--ease-out);
+            }}
+            .home-intro-summary:hover {{
+                background: var(--color-surface-hover);
+            }}
+            .home-intro-details[open] .home-intro-summary {{
+                background: var(--color-surface-hover);
+                border-bottom: 1px solid var(--color-divider);
+            }}
+            .home-intro-summary .home-welcome-first-row {{
+                flex: 1;
+                min-width: 0;
+            }}
+            .home-intro-summary .home-welcome-first-line {{
+                font-size: clamp(17px, 1.6vw, 20px);
+                line-height: 1.35;
+                text-wrap: balance;
+            }}
+            .home-intro-chevron {{
+                display: block;
+            }}
+            .home-intro-body {{
+                display: grid;
+                grid-template-rows: 0fr;
+                padding: 0 var(--space-4);
+                padding-top: 0;
+                transition: grid-template-rows var(--duration-expand) var(--ease-out-quint),
+                            padding-bottom var(--duration-expand) var(--ease-out-quint);
+            }}
+            .home-intro-details[open] .home-intro-body {{
+                grid-template-rows: 1fr;
+                padding-bottom: var(--space-4);
+            }}
+            .home-welcome-text {{
+                width: 100%;
+                max-width: none;
+            }}
+        }}
+
+        .nav-home:focus-visible,
+        .nav-menu-btn:focus-visible,
+        .nav-links a:focus-visible,
+        .chart-nav-tab:focus-visible,
+        .mdb-button:focus-visible,
+        .home-arrow:focus-visible,
+        .mdb-arrow:focus-visible,
+        .country-arrow:focus-visible,
+        .chart-back-btn:focus-visible,
+        .home-chart-row:focus-visible,
+        .mdb-chart-row:focus-visible,
+        .country-map-row:focus-visible,
+        [role="switch"]:focus-visible,
+        [role="button"][tabindex="0"]:focus-visible {{
+            outline: 2px solid var(--color-accent);
+            outline-offset: 2px;
+        }}
+
+        .mdb-button:focus-visible {{
+            outline-offset: 3px;
+        }}
+
+        .mdb-button.selected:focus-visible {{
+            box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.55);
+        }}
+
+        .home-welcome-text .home-link:focus-visible {{
+            outline: 2px solid var(--color-accent);
+            outline-offset: 2px;
+            border-radius: 2px;
+        }}
+
+        .home-intro-summary:focus-visible {{
+            outline: 2px solid var(--color-accent);
+            outline-offset: 3px;
+            border-radius: var(--space-2);
+        }}
+
+        .home-intro-section.is-collapsed {{
+            opacity: 0;
+            max-height: 0;
+            padding-bottom: 0;
+            border-bottom-color: transparent;
+            pointer-events: none;
+        }}
+        .main-row:has(#home-panel.active) .home-intro-section.is-collapsed {{
+            display: block;
+            margin-bottom: calc(-1 * var(--space-4));
+        }}
+
+        @media (min-width: 1201px) {{
+            .home-intro-details[open] .home-intro-summary,
+            .home-intro-details:not([open]) .home-intro-summary {{
+                pointer-events: none;
+            }}
+            .home-intro-body {{
+                display: block;
+                padding-top: 0;
+                grid-template-rows: none;
+            }}
+            .home-intro-summary {{
+                display: flex;
+                align-items: center;
+                gap: var(--space-4);
+            }}
+        }}
+
+        @media (max-width: 768px) {{
+            .home-intro-section {{
+                padding-inline: var(--space-4);
+            }}
+            .home-intro-summary .home-welcome-first-line {{
+                font-size: 17px;
+            }}
+            .home-right-wrapper {{
+                gap: var(--space-4);
+            }}
+            .home-welcome-text {{
+                font-size: 16px;
+            }}
+            .nav {{
+                height: auto;
+                position: sticky;
+                top: 0;
+                z-index: var(--z-sticky);
+                background: var(--color-surface);
+                box-shadow: 0 4px 18px rgba(17, 24, 39, 0.08);
+            }}
+            .nav-inner {{
+                flex-direction: row;
+                align-items: center;
+                gap: var(--space-3);
+                padding: var(--space-3) var(--space-4);
+                border-bottom: 1px solid var(--color-divider);
+            }}
+            .nav-brand {{
+                flex: 1;
+                min-width: 0;
+                gap: var(--space-3);
+                padding: 0;
+                border-bottom: none;
+            }}
+            .nav-brand-text {{
+                display: block;
+                flex: 1;
+                min-width: 0;
+            }}
+            .nav-brand-context {{
+                display: none;
+            }}
+            .nav-brand-name {{
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }}
+            .nav-home {{
+                margin-left: 0;
+                flex: 0 0 auto;
+                padding: 0;
+            }}
+            .nav-home img {{
+                height: 36px;
+                width: auto;
+            }}
+            .nav-menu-btn {{
+                display: inline-flex;
+            }}
+            .nav-menu-popover {{
+                margin: 0;
+                padding: var(--space-2) var(--space-4) var(--space-3);
+                border: none;
+                border-top: 1px solid var(--color-divider);
+                border-radius: 0;
+                background: var(--color-surface);
+                box-shadow: 0 10px 28px rgba(17, 24, 39, 0.12);
+                width: 100%;
+                max-width: none;
+                box-sizing: border-box;
+            }}
+            .nav-menu-popover:popover-open,
+            .nav-menu-popover.is-open {{
+                display: block;
+                position: fixed;
+                left: 0;
+                right: 0;
+                top: var(--nav-bar-height, 60px);
+                width: 100%;
+                z-index: calc(var(--z-sticky) + 1);
+                animation: nav-menu-reveal var(--duration-fast) var(--ease-out);
+            }}
+            .nav-inner {{
+                width: 100%;
+                border-bottom: 1px solid var(--color-divider);
+            }}
+            .nav:has(.nav-menu-popover:popover-open),
+            .nav:has(.nav-menu-popover.is-open) {{
+                border-bottom-color: transparent;
+                box-shadow: none;
+            }}
+            .nav-tab-home {{
+                display: flex;
+            }}
+            .nav-label-long {{
+                display: none;
+            }}
+            .nav-label-short {{
+                display: none;
+            }}
+            .nav-links {{
+                display: flex;
+                flex-direction: column;
+                align-items: stretch;
+                gap: var(--space-1);
+                width: 100%;
+                margin: 0;
+                padding: 0;
+            }}
+            .nav-links a {{
+                min-height: 44px;
+                padding: var(--space-3) var(--space-4);
+                margin: 0;
+                font-size: 15px;
+                font-weight: 600;
+                line-height: 1.3;
+                text-align: left;
+                justify-content: flex-start;
+                align-items: center;
+                white-space: nowrap;
+                border-radius: 8px;
+                border: none;
+                color: var(--color-ink-muted);
+                background: transparent;
+                box-shadow: none;
+            }}
+            .nav-links a .nav-label-long {{
+                display: inline;
+            }}
+            .nav-links a.active,
+            .nav-links a[aria-selected="true"] {{
+                background: var(--color-accent-soft);
+                color: var(--color-accent);
+                box-shadow: none;
+            }}
+            .nav-links a:active {{
+                background: rgba(37, 99, 235, 0.18);
+            }}
+            .sidebar {{
+                position: relative;
+                --sidebar-surface: oklch(94% 0.008 var(--color-hue));
+                border-radius: 0;
+                background-color: var(--sidebar-surface);
+                padding: var(--space-2) 0;
+                margin-top: 0;
+                gap: 0;
+            }}
+            .sidebar::after {{
+                content: "";
+                position: absolute;
+                top: 0;
+                right: 0;
+                width: 28px;
+                height: 100%;
+                pointer-events: none;
+                background: linear-gradient(to left, var(--sidebar-surface), transparent);
+            }}
+            .buttons-wrapper {{
+                flex-wrap: nowrap;
+                justify-content: flex-start;
+                overflow-x: auto;
+                overscroll-behavior-x: contain;
+                -webkit-overflow-scrolling: touch;
+                scroll-snap-type: x proximity;
+                scrollbar-width: none;
+                gap: var(--space-1);
+                padding-inline: var(--space-2);
+                padding-block: var(--space-2);
+            }}
+            .buttons-wrapper::-webkit-scrollbar {{
+                display: none;
+            }}
+            .mdb-button {{
+                width: 132px;
+                min-width: 132px;
+                max-width: none;
+                max-height: 56px;
+                border-radius: 0;
+                scroll-snap-align: start;
+            }}
+            .mdb-button:active {{
+                transform: scale(0.98);
+                border-color: var(--color-accent);
+            }}
+            .home-right-wrapper,
+            .sidebar {{
+                height: auto;
+                min-height: 0;
+            }}
+            .home-chart-row,
+            .mdb-chart-row,
+            .country-map-row {{
+                scroll-snap-type: x proximity;
+            }}
+            .home-slide-1 .home-welcome-block {{
+                padding: 0 var(--space-2) var(--space-4);
+                width: min(72ch, calc(100vw - var(--space-8)));
+                max-width: 100%;
+                box-sizing: border-box;
+            }}
+            .home-welcome-first-line {{
+                font-size: 19px;
+                text-wrap: balance;
+            }}
+            .home-welcome-text {{
+                font-size: 16px;
+                line-height: 1.65;
+            }}
+            .home-legend-and-totals {{
+                width: 100%;
+                max-width: 100%;
+                margin-bottom: var(--space-4);
+                padding-inline: var(--space-4);
+            }}
+            .home-sdg-legend-item {{
+                max-width: none;
+            }}
+            .main-row {{
+                padding-inline: 0;
+            }}
+            .home-intro-section {{
+                padding-inline: var(--space-4);
+            }}
+            .home-chart-area {{
+                width: 100%;
+                max-width: 100%;
+                border-radius: 0;
+            }}
+            .home-stack-chart-wrap {{
+                width: 100%;
+                max-width: 100%;
+            }}
+            .home-slider-wrapper,
+            .mdb-slider-wrapper,
+            .chart-wrapper,
+            .mdb-square-chart-wrapper,
+            #country-panel .map-wrapper,
+            .country-map-content {{
+                width: 100%;
+                max-width: 100%;
+                border-radius: 0;
+            }}
+            .home-slider-wrapper,
+            .mdb-slider-wrapper {{
+                border-left: none;
+                border-right: none;
+            }}
+            .chart-wrapper,
+            .mdb-square-chart-wrapper {{
+                padding-block: var(--space-6);
+                padding-inline: var(--space-4);
+            }}
+            .chart-wrapper .chart-container,
+            .mdb-square-chart-wrapper .chart-container,
+            .home-slide-2,
+            .home-slide-3,
+            .home-slide-4,
+            .home-slide-5,
+            .home-slide-2 .home-pie-wrap,
+            #country-panel .map-container {{
+                border-radius: 0;
+            }}
+            .home-slide-2,
+            .home-slide-3,
+            .home-slide-4,
+            .home-slide-5 {{
+                padding-inline: var(--space-4);
+            }}
+            .home-arrow,
+            .mdb-arrow,
+            .country-arrow {{
+                width: 44px;
+                height: 44px;
+                z-index: 6;
+            }}
+            .home-arrow:active,
+            .mdb-arrow:active,
+            .country-arrow:active {{
+                background: rgba(55, 65, 81, 0.65);
+            }}
+            .chart-back-btn:active {{
+                background: var(--color-accent-soft);
+            }}
+            #country-panel .map-metric-switch,
+            .home-pie-wrap .map-metric-switch {{
+                flex-wrap: wrap;
+                justify-content: center;
+                max-width: calc(100vw - var(--space-8));
+            }}
+            .view-panel.plain {{
+                padding: var(--space-8) var(--space-4);
+            }}
+            .about-acknowledgement {{
+                padding: 0 var(--space-2);
+            }}
+        }}
+
+        @media (max-width: 480px) {{
+            .nav-inner {{
+                padding: var(--space-3);
+            }}
+            .nav-home img {{
+                height: 32px;
+            }}
+            .nav-brand-name {{
+                font-size: 14px;
+            }}
+            .nav-menu-btn {{
+                padding: var(--space-2);
+            }}
+            .nav-menu-current {{
+                max-width: 88px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }}
+            .home-welcome-block {{
+                width: 100%;
+                max-width: none;
+                padding: 0;
+            }}
+            .chart-wrapper .chart-title,
+            .home-chart-title {{
+                font-size: 17px;
+            }}
+        }}
+
+        @media (pointer: coarse) {{
+            .nav-links a,
+            .mdb-button,
+            .home-arrow,
+            .mdb-arrow,
+            .country-arrow,
+            .chart-back-btn,
+            [role="button"][tabindex="0"],
+            #country-panel .map-metric-switch .switch-track,
+            .home-pie-wrap .map-metric-switch .switch-track {{
+                min-height: 44px;
+                min-width: 44px;
+            }}
+            .mdb-button {{
+                min-width: 120px;
+            }}
+        }}
+
+        @media (hover: none) {{
+            .mdb-button:hover {{
+                transform: none;
+                box-shadow: none;
+            }}
+            .home-arrow-left:hover,
+            .home-arrow-right:hover,
+            .mdb-arrow-left:hover,
+            .mdb-arrow-right:hover,
+            .country-arrow-left:hover,
+            .country-arrow-right:hover {{
+                transform: translateY(-50%);
+            }}
+            #country-panel .map-wrapper .map-sdg-logo-wrap:hover img {{
+                transform: none;
+            }}
+            .home-sdg-wheel-img:hover {{
+                transform: none;
+            }}
+        }}
+
+        @media (prefers-reduced-motion: reduce) {{
+            .view-panel.active {{
+                animation: none;
+            }}
+            .home-intro-section {{
+                transition: none;
+            }}
+            .home-intro-body {{
+                transition: none;
+            }}
+            *,
+            *::before,
+            *::after {{
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }}
+            .mdb-button:hover {{
+                transform: none;
+            }}
+            .home-arrow-left:hover,
+            .home-arrow-right:hover,
+            .mdb-arrow-left:hover,
+            .mdb-arrow-right:hover,
+            .country-arrow-left:hover,
+            .country-arrow-right:hover {{
+                transform: translateY(-50%);
+            }}
+            .home-sdg-wheel-img.spin,
+            .home-sdg-wheel-img.spin-slowdown {{
+                animation: none !important;
+            }}
         }}
     </style>
 </head>
@@ -2789,19 +3895,54 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
     {peer_review_watermark_html}
     <div class="page">
         <div class="dashboard-inner">
-        <nav class="nav">
+        <nav class="nav" aria-label="Dashboard">
             <div class="nav-inner">
-                <a href="#" class="nav-home" id="nav-home" title="Home">
-                    <img src="{home_logo_path}" alt="Home" />
-                </a>
-                <div class="nav-links">
-                    <a href="#" id="nav-view-mdb">MDB Finance by SDG</a>
-                    <a href="#" id="nav-view-country">Explore by Country</a>
-                    <a href="#" id="nav-about">About this Work</a>
+                <div class="nav-brand">
+                    <a href="#" class="nav-home" id="nav-home" title="Home" aria-label="Home">
+                        <img src="{home_logo_path}" alt="" />
+                    </a>
+                    <div class="nav-brand-text">
+                        <p class="nav-brand-name">MDB-SDG Dashboard</p>
+                        <p class="nav-brand-context" id="nav-section-label">Overview</p>
+                    </div>
+                </div>
+                <button type="button" class="nav-menu-btn" id="nav-menu-btn" popovertarget="nav-menu-popover" aria-expanded="false" aria-controls="nav-menu-popover" aria-label="Open navigation menu">
+                    <span class="nav-menu-icon" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></span>
+                    <span class="nav-menu-current" id="nav-menu-current">Overview</span>
+                </button>
+            </div>
+            <div id="nav-menu-popover" popover="auto" class="nav-menu-popover">
+                <div class="nav-links" role="tablist" aria-label="Dashboard sections">
+                    <a href="#" id="nav-tab-home" class="nav-tab-home" role="tab" aria-selected="true"><span class="nav-label-short">Overview</span><span class="nav-label-long">Overview</span></a>
+                    <a href="#" id="nav-view-mdb" role="tab" aria-selected="false"><span class="nav-label-short">MDB</span><span class="nav-label-long">MDB Finance by SDG</span></a>
+                    <a href="#" id="nav-view-country" role="tab" aria-selected="false"><span class="nav-label-short">Country</span><span class="nav-label-long">Explore by Country</span></a>
+                    <a href="#" id="nav-about" role="tab" aria-selected="false"><span class="nav-label-short">About</span><span class="nav-label-long">About this Work</span></a>
                 </div>
             </div>
         </nav>
         <div class="main-row" id="main-row">
+            <section class="home-intro-section" aria-label="Dashboard introduction">
+                <details class="home-intro-details" id="home-intro-details">
+                    <summary class="home-intro-summary" id="home-intro-summary">
+                        <span class="home-welcome-first-row">
+                            <span class="home-welcome-first-line">Welcome to the MDB-SDG Dashboard.</span>
+                            {f'<img class="home-sdg-wheel-img" id="home-sdg-wheel" src="{sdg_wheel_path}" alt="SDG Wheel" title="SDG Wheel" />' if sdg_wheel_path else ''}
+                        </span>
+                        <svg class="home-intro-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                    </summary>
+                    <div class="home-intro-body" id="home-intro-body">
+                        <div class="home-intro-body-inner">
+                        <div class="home-welcome-block" id="home-welcome-block">
+                            <p class="home-welcome-text">
+                                This dashboard collects all operations by nine major <strong class="home-term">Multilateral Development Banks (MDBs)</strong> from 2016 to 2025. Through natural language processing of project descriptions, <a class="home-link" href="https://github.com/ChristopherMa90/Bert-SDG-Multi-Label-Model" target="_blank" rel="noopener">a fine-tuned BERT model</a> classifies all operations into the <strong class="home-term">17 Sustainable Development Goals (SDGs)</strong>. The results capture general trends in MDBs' efforts to "finance a sustainable future" over this decade.<br/>
+                                Starting from the chart below, <strong class="home-term">hover over the bars</strong> to see how many projects and the total amount approved by MDBs for a particular year and SDG. You can also <strong class="home-term">select an MDB from the left panel</strong> to filter and view MDB-specific results. Ready to dive deeper? Try <strong class="home-term">MDB Finance by SDG</strong> for goal-level insights, or <strong class="home-term">Explore by Country</strong> for geographic perspectives and country-level stats. Enjoy exploring!
+                            </p>
+                        </div>
+                        </div>
+                    </div>
+                </details>
+            </section>
+            <div class="main-row-body">
             <div class="sidebar sidebar-mdb-v11">
                 <div class="buttons-wrapper">
                     {buttons_html_str}
@@ -2811,33 +3952,26 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 <!-- 首页：左侧 MDB 选择栏同其他页，右侧欢迎文字 + 按年堆叠 bar chart -->
                 <div id="home-panel" class="view-panel active">
                     <div class="home-right-wrapper">
-                        <div class="home-chart-row">
-                            <button type="button" class="home-arrow home-arrow-left" id="home-arrow-left" title="Back to bar chart" aria-label="Back to bar chart"><span class="home-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
-                            <div class="home-slider-wrapper">
-                                <div class="home-slider" id="home-slider">
-                                    <div class="home-slide-1">
-                                        <div class="home-welcome-block">
-                                            <p class="home-welcome-text">
-                                                <span class="home-welcome-first-row">
-                                                    <span class="home-welcome-first-line">Welcome to the MDB-SDG Dashboard.</span>
-                                                    {f'<img class="home-sdg-wheel-img" id="home-sdg-wheel" src="{sdg_wheel_path}" alt="SDG Wheel" title="SDG Wheel" />' if sdg_wheel_path else ''}
-                                                </span>
-                                                <br/><br/>
-                                                This dashboard collects all operations by nine major <strong class="home-term">Multilateral Development Banks (MDBs)</strong> from 2016 to 2025. Through natural language processing of project descriptions, <a class="home-link" href="https://github.com/ChristopherMa90/Bert-SDG-Multi-Label-Model" target="_blank" rel="noopener">a fine-tuned BERT model</a> classifies all operations into the <strong class="home-term">17 Sustainable Development Goals (SDGs)</strong>. The results capture general trends in MDBs' efforts to "finance a sustainable future" over this decade.<br/>
-                                                Starting from the chart below, <strong class="home-term">hover over the bars</strong> to see how many projects and the total amount approved by MDBs for a particular year and SDG. You can also <strong class="home-term">select an MDB from the left panel</strong> to filter and view MDB-specific results. Ready to dive deeper? Try <strong class="home-term">MDB Finance by SDG</strong> for goal-level insights, or <strong class="home-term">Explore by Country</strong> for geographic perspectives and country-level stats. Enjoy exploring!
-                                            </p>
-                                        </div>
-                                        <div class="home-chart-area">
-                                            <div class="home-chart-title-area" id="home-chart-title-area">
-                                                <h2 class="home-chart-title" id="home-chart-title">MDB Operations by Year: Project Count and Financing Amount (2016–2025)</h2>
+                        <div class="chart-stage home-chart-stage">
+                            <nav class="chart-nav" id="home-chart-nav" aria-label="Home chart navigation">
+                                <div class="chart-nav-track" id="home-chart-nav-track" role="tablist" aria-label="Home charts"></div>
+                            </nav>
+                            <div class="chart-stage-viewport">
+                                <div class="home-chart-row chart-stage-row" role="region" aria-label="Home charts" tabindex="0">
+                                    <div class="home-slider-wrapper">
+                                        <div class="home-slider" id="home-slider">
+                                            <div class="home-slide-1">
+                                                <div class="home-chart-area">
+                                                    <div class="home-chart-title-area" id="home-chart-title-area">
+                                                        <h2 class="home-chart-title" id="home-chart-title">MDB Operations by Year: Project Count and Financing Amount (2016–2025)</h2>
+                                                    </div>
+                                                    <div class="home-stack-chart-wrap">
+                                                        <canvas id="home-stack-canvas"></canvas>
+                                                        <div id="home-chart-tooltip"></div>
+                                                        <button type="button" class="chart-back-btn" id="home-chart-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <div class="home-stack-chart-wrap">
-                                                <canvas id="home-stack-canvas"></canvas>
-                                                <div id="home-chart-tooltip"></div>
-                                                <button type="button" class="chart-back-btn" id="home-chart-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
-                                            </div>
-                                        </div>
-                                    </div>
                                     <div class="home-slide-2">
                                         <div class="home-pie-title-area">
                                             <h2 class="chart-title" id="home-pie-chart-title">MDB Operations by SDG: Project Share (2016–2025)</h2>
@@ -2851,7 +3985,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                                 <span class="home-pie-center-hint" id="home-pie-center-hint-2" style="display:none;"></span>
                                             </div>
                                             <button type="button" class="chart-back-btn" id="home-pie-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
-                                            <div class="map-metric-switch home-pie-metric-switch" id="home-pie-metric-switch" role="switch" aria-checked="true" aria-label="Project count or amount">
+                                            <div class="map-metric-switch home-pie-metric-switch" id="home-pie-metric-switch" role="switch" tabindex="0" aria-checked="true" aria-label="Project count or amount">
                                                 <span class="map-metric-label active" id="home-pie-metric-label-left">Project count</span>
                                                 <div class="switch-track on" id="home-pie-switch-track" title="点击切换：项目数量 / 金额（十亿美元）">
                                                     <div class="switch-thumb"></div>
@@ -2882,7 +4016,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                                 <span class="home-pie-center-hint" id="home-pointer-center-hint-2" style="display:none;"></span>
                                             </div>
                                             <button type="button" class="chart-back-btn" id="home-pointer-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
-                                            <div class="map-metric-switch home-pie-metric-switch" id="home-pointer-metric-switch" role="switch" aria-checked="true" aria-label="Project count or amount">
+                                            <div class="map-metric-switch home-pie-metric-switch" id="home-pointer-metric-switch" role="switch" tabindex="0" aria-checked="true" aria-label="Project count or amount">
                                                 <span class="map-metric-label active" id="home-pointer-metric-label-left">Project count</span>
                                                 <div class="switch-track on" id="home-pointer-switch-track" title="点击切换：项目数量 / 金额（十亿美元）">
                                                     <div class="switch-thumb"></div>
@@ -2927,7 +4061,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                     </div>
                                 </div>
                             </div>
-                            <button type="button" class="home-arrow home-arrow-right" id="home-arrow-right" title="View next chart" aria-label="View next chart"><span class="home-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></span></button>
+                                </div>
+                            </div>
                         </div>
                         <div class="home-legend-and-totals">
                             <div class="home-totals-block-wrap" style="--home-totals-border-gradient: {sdg_conic_border};">
@@ -2936,9 +4071,11 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                     <div class="home-totals-amount">Total Amount Approved: <span id="home-totals-amount-n">—</span> <span id="home-totals-amount-unit">Billion USD</span></div>
                                 </div>
                             </div>
-                            <div class="home-sdg-legend">
-                                <div class="home-sdg-legend-row">{home_sdg_legend_html_row1}</div>
-                                <div class="home-sdg-legend-row">{home_sdg_legend_html_row2}</div>
+                            <div class="home-sdg-legend-wrap">
+                                <div class="home-sdg-legend">
+                                    <div class="home-sdg-legend-row">{home_sdg_legend_html_row1}</div>
+                                    <div class="home-sdg-legend-row">{home_sdg_legend_html_row2}</div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -2946,10 +4083,14 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 <!-- View by MDB：整体/单 MDB bar chart + 右箭头进入方形图表视图 -->
                 <div id="mdb-panel" class="view-panel">
                     <div id="charts-panel" class="charts-panel">
-                        <div class="mdb-chart-row">
-                            <button type="button" class="mdb-arrow mdb-arrow-left" id="mdb-arrow-left" title="Back to bar chart" aria-label="Back to bar chart"><span class="mdb-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
-                            <div class="mdb-slider-wrapper">
-                                <div class="mdb-slider mdb-slide-pos-0" id="mdb-slider">
+                        <div class="chart-stage mdb-chart-stage">
+                            <nav class="chart-nav" id="mdb-chart-nav" aria-label="MDB chart navigation">
+                                <div class="chart-nav-track" id="mdb-chart-nav-track" role="tablist" aria-label="MDB charts"></div>
+                            </nav>
+                            <div class="chart-stage-viewport">
+                                <div class="mdb-chart-row chart-stage-row" role="region" aria-label="MDB charts" tabindex="0">
+                                    <div class="mdb-slider-wrapper">
+                                        <div class="mdb-slider mdb-slide-pos-0" id="mdb-slider">
                                     <div class="mdb-slide-1">
                                         <div class="chart-wrapper" id="chart-wrapper">
                                             <h2 class="chart-title">MDB Operations and Their Alignment with the Sustainable Development Goals (2016–2025)</h2>
@@ -3005,7 +4146,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                                             <div class="mdb-cooccurrence-fixed-tooltip" id="mdb-cooccurrence-fixed-tooltip"></div>
                                                         </div>
                                                     </div>
-                                                    <div class="mdb-axis-spacer"><div class="mdb-axis-spacer-global" id="mdb-coocc-global-logo" title="Clear selection / All SDGs" role="button"><img src="{mdb_global_logo_path}" alt="SDG All" /></div></div>
+                                                    <div class="mdb-axis-spacer"><div class="mdb-axis-spacer-global" id="mdb-coocc-global-logo" title="Clear selection / All SDGs" role="button">{_img_tag(mdb_global_logo_path, "SDG All", lazy=True)}</div></div>
                                                     <div class="mdb-axis-x-wrap">
                                                         <div class="mdb-axis-x-list">{mdb_bottom_axis_html}</div>
                                                     </div>
@@ -3039,17 +4180,23 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                     </div>
                                 </div>
                             </div>
-                            <button type="button" class="mdb-arrow mdb-arrow-right" id="mdb-arrow-right" title="View square chart" aria-label="View square chart"><span class="mdb-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></span></button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
                 <!-- View by Country：地图 + 滑块 -->
                 <div id="country-panel" class="view-panel">
-                    <div class="country-map-row">
-                        <div class="country-map-outer">
-                            <button type="button" class="country-arrow country-arrow-left" id="country-arrow-left-zero" title="View slider 0" aria-label="View slider 0"><span class="country-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
-                            <button type="button" class="country-arrow country-arrow-left" id="country-arrow-left" title="Back to map" aria-label="Back to map"><span class="country-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
-                            <div class="country-map-content">
+                    <div class="chart-stage country-chart-stage">
+                        <nav class="chart-nav" id="country-chart-nav" aria-label="Country chart navigation">
+                            <div class="chart-nav-track" id="country-chart-nav-track" role="tablist" aria-label="Country views"></div>
+                        </nav>
+                        <div class="chart-stage-viewport">
+                            <div class="country-map-row chart-stage-row" role="region" aria-label="Country charts" tabindex="0">
+                                <div class="country-map-outer">
+                                    <button type="button" class="country-arrow country-arrow-left" id="country-arrow-left-zero" title="Previous map view" aria-label="Previous map view"><span class="country-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
+                                    <button type="button" class="country-arrow country-arrow-left" id="country-arrow-left" title="Back to map" aria-label="Back to map"><span class="country-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
+                                    <div class="country-map-content">
                                 <div class="map-wrapper">
                                     <div class="country-map-slider" id="country-map-slider">
                                         <div class="country-slide-1">
@@ -3058,13 +4205,13 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                                 <span class="country-map-title-hint">* Click on a country to view more</span>
                                             </div>
                                             <div class="map-container" id="country-map-container">
-                                                <div id="country-map" style="width:1400px;height:700px;position:relative;">
-                                                    <svg id="country-map-svg" width="1400" height="700" viewBox="0 0 1400 700"></svg>
+                                                <div id="country-map" style="width:100%;height:100%;position:relative;">
+                                                    <svg id="country-map-svg" width="100%" height="100%" viewBox="0 0 1400 700" preserveAspectRatio="xMidYMid meet"></svg>
                                                     <div class="country-tooltip" id="country-tooltip"></div>
                                                 </div>
                                                 <div class="map-error" id="country-map-error"></div>
                                                 <div class="map-overlay-panel">
-                                                    <div class="map-metric-switch" id="map-metric-switch" role="switch" aria-checked="true" aria-label="Project count or amount">
+                                                    <div class="map-metric-switch" id="map-metric-switch" role="switch" tabindex="0" aria-checked="true" aria-label="Project count or amount">
                                                         <span class="map-metric-label active" id="map-metric-label-left">Project count</span>
                                                         <div class="switch-track on" id="map-switch-track" title="Switch: project count / amount (billion USD)">
                                                             <div class="switch-thumb"></div>
@@ -3110,7 +4257,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                                     <canvas id="country-radar-ring-canvas"></canvas>
                                                     <div id="country-radar-tooltip"></div>
                                                     <button type="button" class="chart-back-btn" id="country-radar-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
-                                                    <div class="map-metric-switch" id="radar-metric-switch" role="switch" aria-checked="true" aria-label="Project count or amount">
+                                                    <div class="map-metric-switch" id="radar-metric-switch" role="switch" tabindex="0" aria-checked="true" aria-label="Project count or amount">
                                                         <span class="map-metric-label active" id="radar-metric-label-left">Project count</span>
                                                         <div class="switch-track on" id="radar-switch-track" title="Switch: project count / amount (billion USD)">
                                                             <div class="switch-thumb"></div>
@@ -3136,7 +4283,6 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                     </div>
                                 </div>
                             </div>
-                            <button type="button" class="country-arrow country-arrow-right" id="country-arrow-right" title="View detail" aria-label="View detail"><span class="country-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></span></button>
                         </div>
                     </div>
                 </div>
@@ -3153,42 +4299,122 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     </div>
                 </div>
             </div>
+            </div>
         </div>
         </div>
     </div>
 
     <script>
-        window.SDG_TOTALS = {sdg_totals_js};
-        window.MDB_TOTALS = {mdb_totals_js};
+        {data_bootstrap_js}
         window.MDB_NAMES = {mdb_names_js};
-        window.COUNTRY_TOTALS = {country_totals_js};
-        window.SDG_INDEX = {sdg_index_js};
-        window.ISO_NUMERIC_TO_ALPHA2 = {iso_numeric_to_alpha2_js};
-        window.COUNTRY_NAMES = {country_names_js};
-        window.ALPHA2_TO_ALPHA3 = {alpha2_to_alpha3_js};
-        window.ALPHA3_TO_ALPHA2 = {alpha3_to_alpha2_js};
-        window.COUNTRY_TOPOLOGY = {country_topology_js};
-        window.MOST_RELEVANT_SDG_DATA = {most_relevant_sdg_js};
         window.SDG_ICON_PATHS = {sdg_icon_paths_js};
         window.SDG_CROP_PATHS = {sdg_crop_paths_js};
         window.HOME_POINTER_RING_PATH = {home_pointer_ring_path_js};
         window.SDG_COLORS = {sdg_colors_js};
         window.SDG_GOAL_NAMES = {sdg_goal_names_js};
-        window.SDG_COOCCURRENCE = {sdg_cooccurrence_js};
-        window.COUNTRY_NEED_PROJECT_SIMILARITY = {country_need_project_similarity_js};
-        window.COUNTRY_FY26_INCOME_GROUP = {country_fy26_income_js};
-        window.MDB_AMOUNT_HISTOGRAM = {mdb_amount_histogram_js};
-        window.MR_CHORD_FLOWS = {mr_chord_flows_js};
-        window.MR_AMOUNT_SAMPLES = {mr_amount_samples_js};
         window.HOME_CHORD_RING_PATH = {home_chord_ring_path_js};
+
+        function dashboardColor(token, fallback) {{
+            try {{
+                var v = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+                return v || fallback;
+            }} catch (e) {{
+                return fallback;
+            }}
+        }}
 
         var DEFAULT_CHART_TITLE = "MDB Operations and Their Alignment with the Sustainable Development Goals (2016–2025)";
         var currentView = "home";
         var homeSelectedMdbIndex = 0;
 
+        var NAV_SECTION_LABELS = {{
+            home: "Overview",
+            mdb: "MDB Finance",
+            country: "By Country",
+            about: "About"
+        }};
+
+        function updateNavSectionLabel(viewId) {{
+            var label = NAV_SECTION_LABELS[viewId] || "Overview";
+            var el = document.getElementById("nav-section-label");
+            if (el) el.textContent = label;
+            var menuCurrent = document.getElementById("nav-menu-current");
+            if (menuCurrent) menuCurrent.textContent = label;
+        }}
+
+        function closeNavMenu() {{
+            var pop = document.getElementById("nav-menu-popover");
+            if (!pop) return;
+            if (typeof pop.hidePopover === "function") {{
+                try {{ pop.hidePopover(); }} catch (e) {{}}
+            }} else {{
+                pop.classList.remove("is-open");
+            }}
+            var btn = document.getElementById("nav-menu-btn");
+            if (btn) btn.setAttribute("aria-expanded", "false");
+        }}
+
+        function syncNavBarHeight() {{
+            var nav = document.querySelector(".nav");
+            if (!nav) return;
+            document.documentElement.style.setProperty("--nav-bar-height", nav.offsetHeight + "px");
+        }}
+
+        function initNavMenuPopover() {{
+            var btn = document.getElementById("nav-menu-btn");
+            var pop = document.getElementById("nav-menu-popover");
+            if (!btn || !pop) return;
+            syncNavBarHeight();
+            window.addEventListener("resize", syncNavBarHeight);
+            if (typeof pop.showPopover !== "function") {{
+                btn.addEventListener("click", function(e) {{
+                    e.preventDefault();
+                    e.stopPropagation();
+                    syncNavBarHeight();
+                    var open = !pop.classList.contains("is-open");
+                    pop.classList.toggle("is-open", open);
+                    btn.setAttribute("aria-expanded", open ? "true" : "false");
+                }});
+                document.addEventListener("click", function(e) {{
+                    if (!pop.classList.contains("is-open")) return;
+                    if (pop.contains(e.target) || btn.contains(e.target)) return;
+                    closeNavMenu();
+                }});
+                document.addEventListener("keydown", function(e) {{
+                    if (e.key === "Escape") closeNavMenu();
+                }});
+            }} else {{
+                pop.addEventListener("toggle", function(e) {{
+                    syncNavBarHeight();
+                    btn.setAttribute("aria-expanded", e.newState === "open" ? "true" : "false");
+                }});
+            }}
+        }}
+
+        function initHomeIntroDisclosure() {{
+            var details = document.getElementById("home-intro-details");
+            if (!details) return;
+            var mq = window.matchMedia("(max-width: 1200px)");
+            function syncIntroOpenState() {{
+                if (mq.matches) {{
+                    details.removeAttribute("open");
+                }} else {{
+                    details.setAttribute("open", "");
+                }}
+            }}
+            syncIntroOpenState();
+            if (typeof mq.addEventListener === "function") {{
+                mq.addEventListener("change", syncIntroOpenState);
+            }} else if (typeof mq.addListener === "function") {{
+                mq.addListener(syncIntroOpenState);
+            }}
+        }}
+
         function setActiveNav(id) {{
             document.querySelectorAll(".nav-links a").forEach(function(a) {{
-                a.classList.toggle("active", a.id === id);
+                var on = a.id === id;
+                a.classList.toggle("active", on);
+                a.setAttribute("aria-selected", on ? "true" : "false");
             }});
         }}
 
@@ -3241,7 +4467,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 mainRow.classList.toggle("hide-sidebar", viewId === "about");
             }}
             if (viewId === "home") {{
-                setActiveNav("");
+                setActiveNav("nav-tab-home");
+                updateNavSectionLabel("home");
                 if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
                 if (typeof updateHomeArrows === "function") updateHomeArrows();
                 requestAnimationFrame(function() {{
@@ -3250,10 +4477,12 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             }}
             if (viewId === "mdb") {{
                 setActiveNav("nav-view-mdb");
+                updateNavSectionLabel("mdb");
                 updateMdbArrows();
             }}
             if (viewId === "country") {{
                 setActiveNav("nav-view-country");
+                updateNavSectionLabel("country");
                 if (typeof window.initCountryMap === "function") window.initCountryMap();
                 updateCountryArrows();
                 if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
@@ -3262,11 +4491,75 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     if (typeof syncSidebarHeight === "function") syncSidebarHeight();
                 }});
             }}
-            if (viewId === "about") setActiveNav("nav-about");
+            if (viewId === "about") {{
+                setActiveNav("nav-about");
+                updateNavSectionLabel("about");
+            }}
         }}
 
         function syncSidebarHeight() {{
             /* 侧栏高度已用固定 866px 写定，不再动态设置 */
+        }}
+
+        function layoutSlideStep(wrapperEl) {{
+            if (!wrapperEl) return 0;
+            var w = Math.floor(wrapperEl.getBoundingClientRect().width);
+            return w > 0 ? w : 0;
+        }}
+
+        function applySliderOffset(sliderEl, offset) {{
+            if (!sliderEl) return;
+            var step = layoutSlideStep(sliderEl.parentElement);
+            if (!step || offset <= 0) {{
+                sliderEl.style.transform = "";
+                return;
+            }}
+            sliderEl.style.transform = "translateX(-" + (offset * step) + "px)";
+        }}
+
+        function homeSliderOffset(logicalIndex) {{
+            var cls = homeSliderClass(logicalIndex);
+            if (!cls) return 0;
+            var m = cls.match(/slide-(\\d+)/);
+            return m ? Math.max(0, parseInt(m[1], 10) - 1) : 0;
+        }}
+
+        function syncLayoutSliders() {{
+            var homeSlider = document.getElementById("home-slider");
+            if (homeSlider) applySliderOffset(homeSlider, homeSliderOffset(homeSlideIndex));
+            var mdbSlider = document.getElementById("mdb-slider");
+            if (mdbSlider) applySliderOffset(mdbSlider, mdbSlideIndex);
+            var countrySlider = document.getElementById("country-map-slider");
+            if (countrySlider) {{
+                var countryOffset = countrySlideIndex >= 2 ? countrySlideIndex - 1 : 0;
+                applySliderOffset(countrySlider, countryOffset);
+            }}
+        }}
+
+        var layoutResizeTimer;
+        function onLayoutResize() {{
+            clearTimeout(layoutResizeTimer);
+            layoutResizeTimer = setTimeout(function() {{
+                syncLayoutSliders();
+                if (document.getElementById("country-panel") && document.getElementById("country-panel").classList.contains("active")) {{
+                    if (typeof window.initCountryMap === "function") window.initCountryMap();
+                }}
+                if (document.getElementById("home-panel") && document.getElementById("home-panel").classList.contains("active")) {{
+                    if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+                }}
+                if (document.getElementById("mdb-panel") && document.getElementById("mdb-panel").classList.contains("active")) {{
+                    if (mdbSlideIndex === 0 && typeof window.setSdgChartData === "function") {{
+                        window.mdbChartInited = false;
+                        if (typeof initMdbChartOnce === "function") initMdbChartOnce();
+                    }} else if (mdbSlideIndex === 1 && typeof drawMdbCooccurrenceHeatmap === "function") {{
+                        drawMdbCooccurrenceHeatmap();
+                    }} else if (mdbSlideIndex === 2 && typeof window.drawMdbAmountHistogram === "function") {{
+                        window.drawMdbAmountHistogram();
+                    }} else if (mdbSlideIndex === 3 && typeof drawMdbChordChart === "function") {{
+                        drawMdbChordChart();
+                    }}
+                }}
+            }}, 180);
         }}
 
         window.initHomeChartOnce = function() {{
@@ -3319,7 +4612,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 canvas.removeEventListener("mouseleave", window.homeCanvasMouseLeaveHandler);
             }}
             var isMdbSelected = homeSelectedMdbIndex > 0;
+            var introSection = document.querySelector(".home-intro-section");
             if (welcomeBlock) welcomeBlock.classList.toggle("hidden", isMdbSelected);
+            if (introSection) introSection.classList.toggle("is-collapsed", isMdbSelected);
             if (titleArea) titleArea.classList.remove("hidden");
             if (chartArea) chartArea.classList.toggle("expanded", isMdbSelected);
             if (backBtn) backBtn.classList.toggle("visible", isMdbSelected);
@@ -3341,7 +4636,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             var exportChartHeight = (typeof window.HOME_FIG_EXPORT_CHART_HEIGHT === "number" && window.HOME_FIG_EXPORT_CHART_HEIGHT > 0)
                 ? Math.round(window.HOME_FIG_EXPORT_CHART_HEIGHT)
                 : null;
-            var w = 1352;
+            var w = Math.max(320, Math.floor((document.querySelector(".home-stack-chart-wrap") || {{}}).clientWidth || (chartArea && chartArea.clientWidth) || 1352));
             var h;
             if (isMdbSelected && wrapperEl && legendEl && typeof window._homeDefaultLegendOffsetTop === "number" && window._homeDefaultLegendOffsetTop > 0) {{
                 h = window._homeDefaultLegendOffsetTop - 71;
@@ -3364,11 +4659,11 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     titleEl.textContent = "MDB Operations by Year: Project Count and Financing Amount (2016–2025)";
             }}
             var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
-            var sidePadding = 36;
-            var timeAxisInset = 22;
-            var chartShiftRight = 18;
-            var yearRowLeft = sidePadding + timeAxisInset + chartShiftRight;
-            var yearRowRight = w - sidePadding - timeAxisInset + chartShiftRight;
+            var sidePadding = 8;
+            var rightPadding = w < 480 ? 16 : (w < 768 ? 18 : 22);
+            var leftAxisWidth = w < 480 ? 30 : (w < 768 ? 34 : 40);
+            var yearRowLeft = sidePadding + leftAxisWidth;
+            var yearRowRight = w - rightPadding;
             var availableWidth = yearRowRight - yearRowLeft;
             var yearRowHeight = 52;
             var axisGap = 40;
@@ -3380,9 +4675,16 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             var bottomChartBottom = h - axisGap;
             if (topChartBottom <= topChartTop + 30) topChartBottom = topChartTop + 30;
             if (bottomChartBottom <= bottomChartTop + 30) bottomChartBottom = bottomChartTop + 30;
-            var gap = 38;
+            var gap = w < 480 ? 18 : (w < 768 ? 22 : 26);
             var barWidth = (availableWidth - gap * (years.length - 1)) / years.length;
             if (barWidth < 2) barWidth = 2;
+            var labelColor = dashboardColor("--color-ink-subtle", "#4b5563");
+            var tickColor = dashboardColor("--color-ink-hint", "#6b7280");
+            var titleColor = dashboardColor("--color-ink-muted", "#374151");
+            var tickFont = w < 480 ? "500 11px 'Segoe UI', sans-serif" : "500 13px 'Segoe UI', sans-serif";
+            var axisTitleFont = w < 480 ? "500 12px 'Segoe UI', sans-serif" : "500 13px 'Segoe UI', sans-serif";
+            var yearFont = w < 480 ? "500 12px 'Segoe UI', sans-serif" : "500 14px 'Segoe UI', sans-serif";
+            var barTotalFont = w < 480 ? "500 10px 'Segoe UI', sans-serif" : "500 11px 'Segoe UI', sans-serif";
             var maxCount = 0, maxAmountB = 0;
             for (var i = 0; i < years.length; i++) {{
                 var bucket = byYear[String(years[i])];
@@ -3415,10 +4717,13 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             var hoveredSegment = null;
 
             function drawFrame() {{
-                ctx.fillStyle = "#ffffff";
+                ctx.fillStyle = dashboardColor("--color-surface", "#ffffff");
                 ctx.fillRect(0, 0, w, h);
-                ctx.setLineDash([4, 4]);
-                ctx.strokeStyle = "rgba(0,0,0,0.26)";
+                ctx.fillStyle = dashboardColor("--color-surface-muted", "#f8fafc");
+                ctx.fillRect(yearRowLeft, topChartTop, availableWidth, topChartH);
+                ctx.fillRect(yearRowLeft, bottomChartTop, availableWidth, bottomChartH);
+                ctx.setLineDash([3, 5]);
+                ctx.strokeStyle = "rgba(15, 23, 42, 0.1)";
                 ctx.lineWidth = 1;
                 countTicks.forEach(function(tick) {{
                     var ratio = tick / scaleMaxCount;
@@ -3439,14 +4744,14 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     ctx.stroke();
                 }});
                 ctx.setLineDash([]);
-                ctx.fillStyle = "#000000";
-                ctx.font = "600 16px 'Segoe UI', sans-serif";
+                ctx.fillStyle = tickColor;
+                ctx.font = tickFont;
                 ctx.textAlign = "right";
                 ctx.textBaseline = "middle";
                 countTicks.forEach(function(tick) {{
                     var ratio = tick / scaleMaxCount;
                     var y = topChartBottom - ratio * topChartH;
-                    ctx.fillText(String(Math.round(tick)), yearRowLeft - 10, y);
+                    ctx.fillText(String(Math.round(tick)), yearRowLeft - 6, y);
                 }});
                 ctx.textAlign = "right";
                 amountTicks.forEach(function(tick) {{
@@ -3456,27 +4761,28 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     var tickLabel = (Math.abs(roundedTick - Math.round(roundedTick)) < 1e-9)
                         ? String(Math.round(roundedTick))
                         : roundedTick.toFixed(1);
-                    ctx.fillText(tickLabel, yearRowLeft - 10, y);
+                    ctx.fillText(tickLabel, yearRowLeft - 6, y);
                 }});
-                ctx.font = "600 17px 'Segoe UI', sans-serif";
+                ctx.font = axisTitleFont;
+                ctx.fillStyle = titleColor;
                 ctx.textAlign = "left";
                 ctx.textBaseline = "bottom";
-                ctx.fillText("Number of projects", 8, topChartTop - 16);
+                ctx.fillText("Number of projects", 4, topChartTop - 12);
                 ctx.textAlign = "left";
                 ctx.textBaseline = "top";
-                ctx.fillText("Amount Approved (USD in billion)", 8, bottomChartBottom + 16);
+                ctx.fillText("Amount Approved (USD in billion)", 4, bottomChartBottom + 12);
 
                 var midGrad = ctx.createLinearGradient(yearRowLeft, 0, yearRowRight, 0);
-                midGrad.addColorStop(0, "#EEF3F9");
-                midGrad.addColorStop(0.5, "#F3F7FC");
-                midGrad.addColorStop(1, "#E6EEF8");
+                midGrad.addColorStop(0, "#f1f5f9");
+                midGrad.addColorStop(0.5, "#f8fafc");
+                midGrad.addColorStop(1, "#eef2f6");
                 ctx.fillStyle = midGrad;
                 ctx.beginPath();
                 ctx.rect(yearRowLeft, yearRowTop, availableWidth, yearRowHeight);
                 ctx.fill();
                 // Keep the time strip clean: no visible hard border.
-                ctx.fillStyle = "#000000";
-                ctx.font = "600 18px 'Segoe UI', sans-serif";
+                ctx.fillStyle = labelColor;
+                ctx.font = yearFont;
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
 
@@ -3498,7 +4804,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         var isHover = hoveredSegment && hoveredSegment === seg;
                         ctx.fillStyle = colors[s] || "#94a3b8";
                         ctx.fillRect(leftX, cStackY, barWidth, segH);
-                        if (isHover) {{ ctx.strokeStyle = "#111827"; ctx.lineWidth = 2; ctx.strokeRect(leftX, cStackY, barWidth, segH); ctx.lineWidth = 1; }}
+                        if (isHover) {{ ctx.strokeStyle = dashboardColor("--color-ink", "#1f2937"); ctx.lineWidth = 2; ctx.strokeRect(leftX, cStackY, barWidth, segH); ctx.lineWidth = 1; }}
                     }}
                     var aStackY = bottomChartTop;
                     for (var s = 0; s < 17; s++) {{
@@ -3510,19 +4816,19 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         var isHover = hoveredSegment && hoveredSegment === seg;
                         ctx.fillStyle = (colors[s] || "#94a3b8") + "cc";
                         ctx.fillRect(leftX, aStackY, barWidth, segH);
-                        if (isHover) {{ ctx.strokeStyle = "#111827"; ctx.lineWidth = 2; ctx.strokeRect(leftX, aStackY, barWidth, segH); ctx.lineWidth = 1; }}
+                        if (isHover) {{ ctx.strokeStyle = dashboardColor("--color-ink", "#1f2937"); ctx.lineWidth = 2; ctx.strokeRect(leftX, aStackY, barWidth, segH); ctx.lineWidth = 1; }}
                         aStackY += segH;
                     }}
-                    ctx.fillStyle = "#334155";
-                    ctx.font = "700 16px 'Segoe UI', sans-serif";
+                    ctx.fillStyle = titleColor;
+                    ctx.font = yearFont;
                     ctx.textAlign = "center";
                     ctx.textBaseline = "middle";
                     ctx.fillText(String(years[i]), cx, yearRowTop + yearRowHeight / 2);
                     if (homeAllSdgLegendSelected) {{
                         var tc = 0, ta = 0;
                         for (var s = 0; s < 17; s++) {{ tc += (bucket.count_by_sdg && bucket.count_by_sdg[s]) || 0; ta += ((bucket.amount_by_sdg && bucket.amount_by_sdg[s]) || 0) / 1e9; }}
-                        ctx.fillStyle = "#111827";
-                        ctx.font = "600 13px 'Segoe UI', sans-serif";
+                        ctx.fillStyle = tickColor;
+                        ctx.font = barTotalFont;
                         ctx.textBaseline = "bottom";
                         ctx.fillText((tc && tc.toLocaleString) ? tc.toLocaleString() : String(tc), cx, cStackY - 4);
                         ctx.textBaseline = "top";
@@ -3780,7 +5086,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         var midAngle = (currentAngle + segEnd) / 2;
                         var midR = (rOuter + rInner) / 2;
                         var lum = hexToLuminance(segColor);
-                        var textColor = lum < 0.45 ? "#ffffff" : "#1f2937";
+                        var textColor = lum < 0.45 ? dashboardColor("--color-surface", "#ffffff") : dashboardColor("--color-ink", "#1f2937");
                         if (frac >= 0.03) {{
                             ctx.font = "700 20px 'Segoe UI', sans-serif";
                             ctx.textAlign = "center";
@@ -5499,20 +6805,31 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
         document.getElementById("nav-home").addEventListener("click", function(e) {{
             e.preventDefault();
+            closeNavMenu();
+            goHome();
+        }});
+        document.getElementById("nav-tab-home").addEventListener("click", function(e) {{
+            e.preventDefault();
+            closeNavMenu();
             goHome();
         }});
         document.getElementById("nav-view-mdb").addEventListener("click", function(e) {{
             e.preventDefault();
+            closeNavMenu();
             goToMdbView();
         }});
         document.getElementById("nav-view-country").addEventListener("click", function(e) {{
             e.preventDefault();
+            closeNavMenu();
             showView("country");
         }});
         document.getElementById("nav-about").addEventListener("click", function(e) {{
             e.preventDefault();
+            closeNavMenu();
             showView("about");
         }});
+        initNavMenuPopover();
+        initHomeIntroDisclosure();
 
         function showNumber(n) {{
             if (currentView === "country") {{
@@ -5937,7 +7254,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     ctx.clearRect(0, 0, containerWidth, containerHeight);
 
                     // 背景
-                    ctx.fillStyle = "#fafafa";
+                    ctx.fillStyle = dashboardColor("--color-surface-muted", "#f8fafc");
                     ctx.fillRect(0, 0, containerWidth, containerHeight);
 
                     ctx.save();
@@ -5954,7 +7271,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         ctx.stroke();
 
                         ctx.setLineDash([]);
-                        ctx.fillStyle = "#111827";
+                        ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                         ctx.font = "600 14px 'Segoe UI', sans-serif";
                         ctx.textAlign = "right";
                         ctx.textBaseline = "middle";
@@ -5963,7 +7280,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     }});
 
                     ctx.setLineDash([]);
-                    ctx.fillStyle = "#111827";
+                    ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                     ctx.font = "600 15px 'Segoe UI', sans-serif";
                     ctx.textAlign = "left";
                     ctx.textBaseline = "bottom";
@@ -5982,7 +7299,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         ctx.stroke();
 
                         ctx.setLineDash([]);
-                        ctx.fillStyle = "#111827";
+                        ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                         ctx.font = "600 14px 'Segoe UI', sans-serif";
                         ctx.textAlign = "left";
                         ctx.textBaseline = "middle";
@@ -5991,7 +7308,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     }});
 
                     ctx.setLineDash([]);
-                    ctx.fillStyle = "#111827";
+                    ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                     ctx.font = "600 15px 'Segoe UI', sans-serif";
                     ctx.textAlign = "right";
                     ctx.textBaseline = "top";
@@ -6256,12 +7573,24 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     if (typeof window.goToMdbView === "function") window.goToMdbView();
                 }});
                 syncSidebarHeight();
-                window.addEventListener("resize", syncSidebarHeight);
+                syncLayoutSliders();
+                window.addEventListener("resize", function() {{
+                    syncSidebarHeight();
+                    onLayoutResize();
+                }});
             }}, 120);
         }}
 
         document.addEventListener("DOMContentLoaded", function() {{
+            whenDashboardReady(function() {{
+            initChartNavigators();
             showView("home");
+            requestAnimationFrame(function() {{
+                syncLayoutSliders();
+                updateHomeArrows();
+                updateMdbArrows();
+                updateCountryArrows();
+            }});
             if (typeof attachMdbPanelChartButtons === "function") attachMdbPanelChartButtons();
             if (typeof setupMdbCooccurrenceAxisClicks === "function") setupMdbCooccurrenceAxisClicks();
             var wheelEl = document.getElementById("home-sdg-wheel");
@@ -6282,6 +7611,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
                 }});
             }}
+            }});
         }});
 
         // ---------- View by Country: D3 + TopoJSON heatmap (1634×900) + dual-handle year slider ----------
@@ -6304,6 +7634,133 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         var mdbSlideIndex = 0;
         var homeSlideIndex = 0;
         var DASHBOARD_LITE = {peer_review_lite_js};
+
+        function homeChartNavItems() {{
+            return DASHBOARD_LITE
+                ? [
+                    {{ index: 0, label: "By year" }},
+                    {{ index: 1, label: "SDG share" }},
+                    {{ index: 2, label: "Triangle" }}
+                ]
+                : [
+                    {{ index: 0, label: "By year" }},
+                    {{ index: 1, label: "SDG share" }},
+                    {{ index: 2, label: "Triangle" }},
+                    {{ index: 3, label: "Co-tags" }},
+                    {{ index: 4, label: "Profile" }}
+                ];
+        }}
+
+        function mdbChartNavItems() {{
+            return DASHBOARD_LITE
+                ? [
+                    {{ index: 0, label: "SDG alignment" }},
+                    {{ index: 1, label: "Co-occurrence" }}
+                ]
+                : [
+                    {{ index: 0, label: "SDG alignment" }},
+                    {{ index: 1, label: "Co-occurrence" }},
+                    {{ index: 2, label: "Commitment size" }},
+                    {{ index: 3, label: "Co-tags" }}
+                ];
+        }}
+
+        function countryChartNavItems() {{
+            return DASHBOARD_LITE
+                ? [
+                    {{ index: 1, label: "Map" }},
+                    {{ index: 2, label: "Radar" }},
+                    {{ index: 3, label: "By year" }}
+                ]
+                : [
+                    {{ index: -1, label: "Income borders" }},
+                    {{ index: 0, label: "Dominant SDG" }},
+                    {{ index: 1, label: "Map" }},
+                    {{ index: 2, label: "Radar" }},
+                    {{ index: 3, label: "By year" }}
+                ];
+        }}
+
+        function buildChartNav(trackId, items, onSelect) {{
+            var track = document.getElementById(trackId);
+            if (!track || track.dataset.built === "1") return;
+            track.dataset.built = "1";
+            track.innerHTML = "";
+            items.forEach(function(item) {{
+                var btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "chart-nav-tab";
+                btn.setAttribute("role", "tab");
+                btn.setAttribute("data-index", String(item.index));
+                btn.textContent = item.label;
+                btn.addEventListener("click", function() {{
+                    onSelect(item.index);
+                }});
+                track.appendChild(btn);
+            }});
+        }}
+
+        function syncChartNavUI(config) {{
+            var current = config.getCurrent();
+            var track = document.getElementById(config.trackId);
+            if (track) {{
+                track.querySelectorAll(".chart-nav-tab").forEach(function(tab) {{
+                    var idx = parseInt(tab.getAttribute("data-index"), 10);
+                    var selected = idx === current;
+                    tab.setAttribute("aria-selected", selected ? "true" : "false");
+                    tab.disabled = (typeof config.isTabDisabled === "function") ? !!config.isTabDisabled(idx) : false;
+                    if (selected) tab.scrollIntoView({{ block: "nearest", inline: "nearest", behavior: "smooth" }});
+                }});
+            }}
+            var intro = document.querySelector(".home-intro-section");
+            if (intro && config.hideIntroOnFilter) {{
+                intro.classList.toggle("is-collapsed", !!config.hideIntroOnFilter());
+            }}
+        }}
+
+        function initChartNavigators() {{
+            buildChartNav("home-chart-nav-track", homeChartNavItems(), function(index) {{
+                setHomeSlideIndex(index);
+            }});
+            buildChartNav("mdb-chart-nav-track", mdbChartNavItems(), function(index) {{
+                setMdbSlideIndex(index);
+            }});
+            buildChartNav("country-chart-nav-track", countryChartNavItems(), function(index) {{
+                setCountrySlideIndex(index);
+            }});
+        }}
+
+        function setHomeSlideIndex(next) {{
+            homeSlideIndex = next;
+            updateHomeArrows();
+            if (homeSlideIndex === 0 && typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+        }}
+
+        function setMdbSlideIndex(next) {{
+            mdbSlideIndex = next;
+            updateMdbArrows();
+        }}
+
+        function setCountrySlideIndex(next) {{
+            countrySlideIndex = next;
+            updateCountryArrows();
+            if (countrySlideIndex <= 1 && typeof window.initCountryMap === "function") window.initCountryMap();
+            if (countrySlideIndex === 2) {{
+                if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
+                requestAnimationFrame(function() {{
+                    if (typeof window.initCountryRadarRing === "function") {{ try {{ window.initCountryRadarRing(); }} catch (e) {{}} }}
+                }});
+            }}
+            if (countrySlideIndex === 3) {{
+                if (typeof syncMapSwitchFromRadar === "function") syncMapSwitchFromRadar();
+                if (typeof window.initCountryBarChart === "function") {{ try {{ window.initCountryBarChart(); }} catch (e) {{}} }}
+            }}
+        }}
+
+        function countryNavItems() {{
+            return countryChartNavItems();
+        }}
+
         function homeSlidePhysical(logical) {{
             if (DASHBOARD_LITE) {{
                 if (logical === 0) return 0;
@@ -6536,7 +7993,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     ctx.fillRect(x, y, CELL, CELL);
                     if (!isDiag) {{
                         var v = cond[i] && typeof cond[i][j] === "number" ? cond[i][j] : 0;
-                        ctx.fillStyle = v >= 0.5 ? "#fff" : "#374151";
+                        ctx.fillStyle = v >= 0.5 ? "#fff" : dashboardColor("--color-ink-muted", "#374151");
                         ctx.font = "700 14px 'Segoe UI', sans-serif";
                         ctx.textAlign = "center";
                         ctx.textBaseline = "middle";
@@ -6557,7 +8014,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         var v = cond[i] && typeof cond[i][j] === "number" ? cond[i][j] : 0;
                         ctx.shadowBlur = 0;
                         ctx.shadowColor = "transparent";
-                        ctx.fillStyle = v >= 0.5 ? "#fff" : "#374151";
+                        ctx.fillStyle = v >= 0.5 ? "#fff" : dashboardColor("--color-ink-muted", "#374151");
                         ctx.font = "700 14px 'Segoe UI', sans-serif";
                         ctx.textAlign = "center";
                         ctx.textBaseline = "middle";
@@ -6749,15 +8206,17 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }};
 
         function updateMdbArrows() {{
-            var right = document.getElementById("mdb-arrow-right");
-            var left = document.getElementById("mdb-arrow-left");
             var slider = document.getElementById("mdb-slider");
-            if (right) right.classList.toggle("visible", mdbSlideIndex < MDB_SLIDE_MAX);
-            if (left) left.classList.toggle("visible", mdbSlideIndex > 0);
             if (slider) {{
                 slider.classList.remove("mdb-slide-pos-0", "mdb-slide-pos-1", "mdb-slide-pos-2", "mdb-slide-pos-3");
                 slider.classList.add("mdb-slide-pos-" + mdbSlideIndex);
+                applySliderOffset(slider, mdbSlideIndex);
             }}
+            syncChartNavUI({{
+                trackId: "mdb-chart-nav-track",
+                items: mdbChartNavItems,
+                getCurrent: function() {{ return mdbSlideIndex; }}
+            }});
             if (mdbSlideIndex === 1) {{
                 requestAnimationFrame(function() {{ if (typeof drawMdbCooccurrenceHeatmap === "function") drawMdbCooccurrenceHeatmap(); }});
             }}
@@ -6770,16 +8229,19 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }}
 
         function updateHomeArrows() {{
-            var right = document.getElementById("home-arrow-right");
-            var left = document.getElementById("home-arrow-left");
             var slider = document.getElementById("home-slider");
-            if (right) right.classList.toggle("visible", homeSlideIndex < homeSlideMaxIndex());
-            if (left) left.classList.toggle("visible", homeSlideIndex > 0);
             if (slider) {{
                 slider.classList.remove("slide-2", "slide-3", "slide-4", "slide-5");
                 var slideClass = homeSliderClass(homeSlideIndex);
                 if (slideClass) slider.classList.add(slideClass);
+                applySliderOffset(slider, homeSliderOffset(homeSlideIndex));
             }}
+            syncChartNavUI({{
+                trackId: "home-chart-nav-track",
+                items: homeChartNavItems,
+                getCurrent: function() {{ return homeSlideIndex; }},
+                hideIntroOnFilter: function() {{ return (homeSelectedMdbIndex || 0) > 0; }}
+            }});
             if (homeSlideIndex >= 1) {{
                 requestAnimationFrame(function() {{
                     if (typeof window.initHomePieAndSlider === "function") window.initHomePieAndSlider();
@@ -6855,18 +8317,22 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
         function updateCountryArrows() {{
             if (DASHBOARD_LITE && countrySlideIndex < COUNTRY_SLIDE_MIN) countrySlideIndex = 1;
-            var right = document.getElementById("country-arrow-right");
-            var left = document.getElementById("country-arrow-left");
-            var leftZero = document.getElementById("country-arrow-left-zero");
             var slider = document.getElementById("country-map-slider");
-            if (right) right.classList.toggle("visible", (countrySlideIndex === -1 || countrySlideIndex === 0 || countrySlideIndex === 1) ? !!selectedCountryCode : countrySlideIndex === 2);
-            if (left) left.classList.toggle("visible", countrySlideIndex >= 2);
-            if (leftZero) leftZero.classList.toggle("visible", !DASHBOARD_LITE && (countrySlideIndex === 1 || countrySlideIndex === 0));
             if (slider) {{
                 slider.classList.remove("detail-view", "slide-2", "slide-3");
                 if (countrySlideIndex === 2) slider.classList.add("slide-2");
                 else if (countrySlideIndex === 3) slider.classList.add("slide-3");
+                var countryOffset = countrySlideIndex >= 2 ? countrySlideIndex - 1 : 0;
+                applySliderOffset(slider, countryOffset);
             }}
+            syncChartNavUI({{
+                trackId: "country-chart-nav-track",
+                items: countryNavItems,
+                isTabDisabled: function(index) {{
+                    return index >= 2 && !selectedCountryCode;
+                }},
+                getCurrent: function() {{ return countrySlideIndex; }}
+            }});
             /* 切换至 country-slide-2 时立即设置 radar 标题，避免首次滑入时闪现占位文案 */
             if (countrySlideIndex === 2) {{
                 var titleEl = document.querySelector(".country-radar-chart-title .chart-title");
@@ -7060,7 +8526,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         function getCountryColor(code, mode, minIdx, maxIdx, minV, maxV) {{
             var v = getCountryMapMetric(code, mode, minIdx, maxIdx);
             if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
-                if (v == null || !isFinite(v) || v <= 0) return "#ffffff";
+                if (v == null || !isFinite(v) || v <= 0) return "var(--color-surface)";
             }}
             if (!(maxV > minV)) return countrySelectedSdgIndex ? "#f0f4f8" : "#E8E8EC";
             var t = (v - minV) / (maxV - minV);
@@ -7117,7 +8583,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
         function countryDefaultStroke(alpha3) {{
             if (alpha3 === selectedCountryCode)
-                return {{ stroke: "#1d4ed8", width: 2.5 }};
+                return {{ stroke: "var(--color-accent)", width: 2.5 }};
             if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
                 var g = "Unknown";
                 if (alpha3 && window.COUNTRY_FY26_INCOME_GROUP && window.COUNTRY_FY26_INCOME_GROUP[alpha3])
@@ -7154,10 +8620,44 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             tooltipEl.style.top = top + "px";
         }}
 
+        var d3LoadPromise = null;
+        window.ensureD3Loaded = function() {{
+            if (window.d3 && window.topojson) return Promise.resolve();
+            if (d3LoadPromise) return d3LoadPromise;
+            d3LoadPromise = new Promise(function(resolve, reject) {{
+                var d3s = document.createElement("script");
+                d3s.src = "https://cdn.jsdelivr.net/npm/d3@7";
+                d3s.async = true;
+                d3s.onload = function() {{
+                    var tjs = document.createElement("script");
+                    tjs.src = "https://cdn.jsdelivr.net/npm/topojson@3";
+                    tjs.async = true;
+                    tjs.onload = function() {{ resolve(); }};
+                    tjs.onerror = function() {{ reject(new Error("TopoJSON load failed")); }};
+                    document.head.appendChild(tjs);
+                }};
+                d3s.onerror = function() {{ reject(new Error("D3 load failed")); }};
+                document.head.appendChild(d3s);
+            }});
+            return d3LoadPromise;
+        }};
+
         window.initCountryMap = function() {{
             var errEl = document.getElementById("country-map-error");
+            function runInitCountryMap() {{
             if (errEl) {{ errEl.classList.remove("visible"); errEl.textContent = ""; }}
             if (!window.COUNTRY_TOTALS) {{ if (errEl) {{ errEl.textContent = "Country data not loaded."; errEl.classList.add("visible"); }} return; }}
+            var mapContainer = document.querySelector("#country-panel .map-container");
+            if (mapContainer) {{
+                countryMapWidth = Math.max(320, Math.floor(mapContainer.clientWidth) || 1400);
+                countryMapHeight = Math.max(280, Math.floor(mapContainer.clientHeight) || 700);
+            }}
+            var mapSvg = document.getElementById("country-map-svg");
+            if (mapSvg) {{
+                mapSvg.setAttribute("width", countryMapWidth);
+                mapSvg.setAttribute("height", countryMapHeight);
+                mapSvg.setAttribute("viewBox", "0 0 " + countryMapWidth + " " + countryMapHeight);
+            }}
 
             var isoMap = window.ISO_NUMERIC_TO_ALPHA2 || {{}};
             var byCountry = getCountryByCountry(window.COUNTRY_TOTALS, countrySelectedMdbIndex) || {{}};
@@ -7251,10 +8751,10 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         var alpha2 = isoMap[id] || "";
                         var alpha3 = (alpha2 && window.ALPHA2_TO_ALPHA3) ? window.ALPHA2_TO_ALPHA3[alpha2] : "";
                         if (selectedCountryCode) {{
-                            if (alpha3 === selectedCountryCode) d3.select(this).attr("stroke", "#374151").attr("stroke-width", 2.5);
+                            if (alpha3 === selectedCountryCode) d3.select(this).attr("stroke", dashboardColor("--color-ink-muted", "#374151")).attr("stroke-width", 2.5);
                             return;
                         }}
-                        d3.select(this).attr("stroke", "#374151").attr("stroke-width", useIncomeBorderMode ? 4.2 : 1);
+                        d3.select(this).attr("stroke", dashboardColor("--color-ink-muted", "#374151")).attr("stroke-width", useIncomeBorderMode ? 4.2 : 1);
                         var name = (d.properties && d.properties.name) || alpha2 || "?";
                         var countVal = getCountryValue(alpha3, "count", countryMinIdx, countryMaxIdx);
                         var amountVal = getCountryValue(alpha3, "amount", countryMinIdx, countryMaxIdx);
@@ -7342,7 +8842,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 g.append("path")
                     .datum(topojson.mesh(countryWorldData, countryWorldData.objects.countries, function(a, b) {{ return a !== b; }}))
                     .attr("fill", "none")
-                    .attr("stroke", (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) ? "#ffffff" : "#94a3b8")
+                    .attr("stroke", (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) ? "var(--color-surface)" : "#94a3b8")
                     .attr("stroke-width", (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) ? 0.6 : 0.3)
                     .attr("d", path);
 
@@ -7468,6 +8968,15 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     if (cTrackRight > 0) countryUpdateSliderUI();
                 }}
             }});
+        }};
+
+            if (window.d3 && window.topojson) {{
+                runInitCountryMap();
+            }} else {{
+                window.ensureD3Loaded().then(runInitCountryMap).catch(function() {{
+                    if (errEl) {{ errEl.textContent = "Map libraries failed to load."; errEl.classList.add("visible"); }}
+                }});
+            }}
         }};
 
         function getCountryTickCenters() {{
@@ -7604,6 +9113,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         }};
 
         document.addEventListener("DOMContentLoaded", function() {{
+            whenDashboardReady(function() {{
             var countryBackBtn = document.getElementById("country-back-btn");
             if (countryBackBtn) {{
                 countryBackBtn.addEventListener("click", function() {{
@@ -7631,107 +9141,6 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     updateCountryArrows();
                 }});
             }}
-            var countryArrowRight = document.getElementById("country-arrow-right");
-            var countryArrowLeft = document.getElementById("country-arrow-left");
-            var countryArrowLeftZero = document.getElementById("country-arrow-left-zero");
-            if (countryArrowRight) {{
-                countryArrowRight.addEventListener("click", function() {{
-                    if (!DASHBOARD_LITE && countrySlideIndex === -1) {{
-                        countrySlideIndex = 0;
-                        updateCountryArrows();
-                        if (typeof window.initCountryMap === "function") window.initCountryMap();
-                    }} else if (!DASHBOARD_LITE && countrySlideIndex === 0) {{
-                        countrySlideIndex = 1;
-                        updateCountryArrows();
-                        if (typeof window.initCountryMap === "function") window.initCountryMap();
-                    }} else if (countrySlideIndex === 1) {{
-                        countrySlideIndex = 2;
-                        updateCountryArrows();
-                        if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
-                        requestAnimationFrame(function() {{
-                            if (typeof window.initCountryRadarRing === "function") {{ try {{ window.initCountryRadarRing(); }} catch (e) {{ console.error("initCountryRadarRing:", e); }} }}
-                        }});
-                    }} else if (countrySlideIndex === 2) {{
-                        countrySlideIndex = 3;
-                        updateCountryArrows();
-                        if (typeof syncMapSwitchFromRadar === "function") syncMapSwitchFromRadar();
-                        if (typeof window.initCountryBarChart === "function") {{
-                            try {{ window.initCountryBarChart(); }} catch (e) {{ console.error("Error initializing country bar chart:", e); }}
-                        }}
-                    }}
-                }});
-            }}
-            if (countryArrowLeft) {{
-                countryArrowLeft.addEventListener("click", function() {{
-                    if (countrySlideIndex === 3) {{
-                        countrySlideIndex = 2;
-                        updateCountryArrows();
-                        if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
-                        requestAnimationFrame(function() {{
-                            if (typeof window.initCountryRadarRing === "function") {{ try {{ window.initCountryRadarRing(); }} catch (e) {{ console.error("initCountryRadarRing:", e); }} }}
-                        }});
-                    }} else if (countrySlideIndex === 2) {{
-                        countrySlideIndex = 1;
-                        updateCountryArrows();
-                        if (typeof syncMapSwitchFromRadar === "function") syncMapSwitchFromRadar();
-                        if (typeof window.initCountryMap === "function") window.initCountryMap();
-                    }}
-                }});
-            }}
-            if (countryArrowLeftZero) {{
-                countryArrowLeftZero.addEventListener("click", function() {{
-                    if (DASHBOARD_LITE) return;
-                    if (countrySlideIndex === 1) {{
-                        countrySlideIndex = 0;
-                        updateCountryArrows();
-                        if (typeof window.initCountryMap === "function") window.initCountryMap();
-                    }} else if (countrySlideIndex === 0) {{
-                        countrySlideIndex = -1;
-                        updateCountryArrows();
-                        if (typeof window.initCountryMap === "function") window.initCountryMap();
-                    }}
-                }});
-            }}
-
-            var mdbArrowRight = document.getElementById("mdb-arrow-right");
-            var mdbArrowLeft = document.getElementById("mdb-arrow-left");
-            if (mdbArrowRight) {{
-                mdbArrowRight.addEventListener("click", function() {{
-                    if (mdbSlideIndex < MDB_SLIDE_MAX) {{
-                        mdbSlideIndex += 1;
-                        updateMdbArrows();
-                    }}
-                }});
-            }}
-            if (mdbArrowLeft) {{
-                mdbArrowLeft.addEventListener("click", function() {{
-                    if (mdbSlideIndex > 0) {{
-                        mdbSlideIndex -= 1;
-                        updateMdbArrows();
-                    }}
-                }});
-            }}
-
-            var homeArrowRight = document.getElementById("home-arrow-right");
-            var homeArrowLeft = document.getElementById("home-arrow-left");
-            if (homeArrowRight) {{
-                homeArrowRight.addEventListener("click", function() {{
-                    if (homeSlideIndex < homeSlideMaxIndex()) {{
-                        homeSlideIndex += 1;
-                        updateHomeArrows();
-                    }}
-                }});
-            }}
-            if (homeArrowLeft) {{
-                homeArrowLeft.addEventListener("click", function() {{
-                    if (homeSlideIndex > 0) {{
-                        homeSlideIndex -= 1;
-                        updateHomeArrows();
-                        if (homeSlideIndex === 0 && typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
-                    }}
-                }});
-            }}
-
             document.querySelectorAll("#home-panel .home-sdg-legend-item").forEach(function(item) {{
                 item.addEventListener("click", function() {{
                     var idx = Number(item.getAttribute("data-sdg-index")) || 0;
@@ -7876,7 +9285,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 }}
                 ctx.clearRect(0, 0, size, size);
                 drawRingBackground();
-                ctx.strokeStyle = "#e5e7eb";
+                ctx.strokeStyle = dashboardColor("--color-divider", "#e5e7eb");
                 ctx.lineWidth = 1;
                 ctx.setLineDash([4, 4]);
                 for (var t = 0; t < tickLabels.length; t++) {{
@@ -7887,7 +9296,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 }}
                 ctx.setLineDash([]);
                 if (hasData) {{
-                    ctx.fillStyle = "#6b7280";
+                    ctx.fillStyle = dashboardColor("--color-ink-hint", "#6b7280");
                     ctx.font = "600 12px 'Segoe UI', sans-serif";
                     ctx.textAlign = "center";
                     ctx.textBaseline = "bottom";
@@ -7956,21 +9365,21 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 ctx.textBaseline = "middle";
                 if (isAmountMode) {{
                     var amountNum = hasData ? totalVal.toFixed(2) : "0.00";
-                    ctx.fillStyle = "#111827";
+                    ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                     ctx.font = "700 38px 'Segoe UI', sans-serif";
                     ctx.fillText(amountNum, cx, cy - 20);
                     ctx.font = "600 18px 'Segoe UI', sans-serif";
-                    ctx.fillStyle = "#6b7280";
+                    ctx.fillStyle = dashboardColor("--color-ink-hint", "#6b7280");
                     ctx.fillText("Billion USD", cx, cy + 14);
                     ctx.font = "400 18px 'Segoe UI', sans-serif";
                     ctx.fillText("Total Amount", cx, cy + 38);
                 }} else {{
                     var countNum = hasData ? Math.round(totalVal).toString() : "0";
-                    ctx.fillStyle = "#111827";
+                    ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                     ctx.font = "700 38px 'Segoe UI', sans-serif";
                     ctx.fillText(countNum, cx, cy - 10);
                     ctx.font = "400 18px 'Segoe UI', sans-serif";
-                    ctx.fillStyle = "#6b7280";
+                    ctx.fillStyle = dashboardColor("--color-ink-hint", "#6b7280");
                     ctx.fillText("Total Project", cx, cy + 18);
                 }}
                 window.countryRadarSectors = sectors;
@@ -7980,7 +9389,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 function drawRadarChartOnly() {{
                     ctx.clearRect(0, 0, size, size);
                     drawRingBackground();
-                    ctx.strokeStyle = "#e5e7eb";
+                    ctx.strokeStyle = dashboardColor("--color-divider", "#e5e7eb");
                     ctx.lineWidth = 1;
                     ctx.setLineDash([4, 4]);
                     for (var t = 0; t < tickLabels.length; t++) {{
@@ -7991,7 +9400,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     }}
                     ctx.setLineDash([]);
                     if (hasData) {{
-                        ctx.fillStyle = "#6b7280";
+                        ctx.fillStyle = dashboardColor("--color-ink-hint", "#6b7280");
                         ctx.font = "600 12px 'Segoe UI', sans-serif";
                         ctx.textAlign = "center";
                         ctx.textBaseline = "bottom";
@@ -8059,21 +9468,21 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     ctx.textBaseline = "middle";
                     if (isAmountMode) {{
                         var amountNum = hasData ? totalVal.toFixed(2) : "0.00";
-                        ctx.fillStyle = "#111827";
+                        ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                         ctx.font = "700 38px 'Segoe UI', sans-serif";
                         ctx.fillText(amountNum, cx, cy - 20);
                         ctx.font = "600 18px 'Segoe UI', sans-serif";
-                        ctx.fillStyle = "#6b7280";
+                        ctx.fillStyle = dashboardColor("--color-ink-hint", "#6b7280");
                         ctx.fillText("Billion USD", cx, cy + 14);
                         ctx.font = "400 18px 'Segoe UI', sans-serif";
                         ctx.fillText("Total Amount", cx, cy + 38);
                     }} else {{
                         var countNum = hasData ? Math.round(totalVal).toString() : "0";
-                        ctx.fillStyle = "#111827";
+                        ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                         ctx.font = "700 38px 'Segoe UI', sans-serif";
                         ctx.fillText(countNum, cx, cy - 10);
                         ctx.font = "400 18px 'Segoe UI', sans-serif";
-                        ctx.fillStyle = "#6b7280";
+                        ctx.fillStyle = dashboardColor("--color-ink-hint", "#6b7280");
                         ctx.fillText("Total Project", cx, cy + 18);
                     }}
                 }}
@@ -8289,7 +9698,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     var barWidth = (availableWidth - gap * (years.length - 1) - barPairGap * years.length) / (years.length * 2);
                     if (barWidth < 2) barWidth = 2;
                     ctx.clearRect(0, 0, w, h);
-                    ctx.fillStyle = "#fafafa";
+                    ctx.fillStyle = dashboardColor("--color-surface-muted", "#f8fafc");
                     ctx.fillRect(0, 0, w, h);
                     function niceTicks(maxVal) {{
                         if (!(maxVal > 0)) return [0, 1];
@@ -8321,7 +9730,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                             amountTicks = niceTicks(maxAmount);
                             scaleMaxAmount = amountTicks[4] || 1;
                         }}
-                        ctx.strokeStyle = "#e5e7eb";
+                        ctx.strokeStyle = dashboardColor("--color-divider", "#e5e7eb");
                         ctx.lineWidth = 1;
                         ctx.setLineDash([4, 4]);
                         countTicks.forEach(function(tick) {{
@@ -8341,7 +9750,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                             ctx.stroke();
                         }});
                         ctx.setLineDash([]);
-                        ctx.fillStyle = "#111827";
+                        ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                         ctx.font = "600 14px 'Segoe UI', sans-serif";
                         ctx.textAlign = "right";
                         ctx.textBaseline = "middle";
@@ -8368,7 +9777,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         scaleMaxCount = 4;
                         amountTicks = [0, 0.3, 0.6, 0.9, 1.2];
                         scaleMaxAmount = 1.2;
-                        ctx.strokeStyle = "#e5e7eb";
+                        ctx.strokeStyle = dashboardColor("--color-divider", "#e5e7eb");
                         ctx.lineWidth = 1;
                         ctx.setLineDash([4, 4]);
                         countTicks.forEach(function(tick) {{
@@ -8388,7 +9797,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                             ctx.stroke();
                         }});
                         ctx.setLineDash([]);
-                        ctx.fillStyle = "#111827";
+                        ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                         ctx.font = "600 14px 'Segoe UI', sans-serif";
                         ctx.textAlign = "right";
                         ctx.textBaseline = "middle";
@@ -8470,7 +9879,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         var axisLabel = useSdgSpecific ? ("SDG " + countrySelectedSdgIndex + " Score") : "SDG Index Score";
                         var yTicks = [0, 25, 50, 75, 100];
                         var yScale = 100;
-                        ctx.strokeStyle = "#e5e7eb";
+                        ctx.strokeStyle = dashboardColor("--color-divider", "#e5e7eb");
                         ctx.lineWidth = 1;
                         ctx.setLineDash([4, 4]);
                         for (var ti = 0; ti < yTicks.length; ti++) {{
@@ -8483,7 +9892,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                             ctx.stroke();
                         }}
                         ctx.setLineDash([]);
-                        ctx.fillStyle = "#111827";
+                        ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                         ctx.font = "600 14px 'Segoe UI', sans-serif";
                         ctx.textAlign = "left";
                         ctx.textBaseline = "middle";
@@ -8531,7 +9940,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                     ctx.lineTo(validPoints[pi].x, validPoints[pi].y);
                                 }}
                                 ctx.stroke();
-                                ctx.fillStyle = "#fafafa";
+                                ctx.fillStyle = dashboardColor("--color-surface-muted", "#f8fafc");
                                 ctx.strokeStyle = lineColor;
                                 ctx.lineWidth = 3;
                                 for (var pi = 0; pi < validPoints.length; pi++) {{
@@ -8551,9 +9960,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         var hoveredLinePoint = null;
                         function drawFrame() {{
                             ctx.clearRect(0, 0, w, h);
-                            ctx.fillStyle = "#fafafa";
+                            ctx.fillStyle = dashboardColor("--color-surface-muted", "#f8fafc");
                             ctx.fillRect(0, 0, w, h);
-                            ctx.strokeStyle = "#e5e7eb";
+                            ctx.strokeStyle = dashboardColor("--color-divider", "#e5e7eb");
                             ctx.lineWidth = 1;
                             ctx.setLineDash([4, 4]);
                             countTicks.forEach(function(tick) {{
@@ -8573,7 +9982,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                 ctx.stroke();
                             }});
                             ctx.setLineDash([]);
-                            ctx.fillStyle = "#111827";
+                            ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                             ctx.font = "600 14px 'Segoe UI', sans-serif";
                             ctx.textAlign = "right";
                             ctx.textBaseline = "middle";
@@ -8630,7 +10039,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                     ctx.fillStyle = countColor;
                                     ctx.fillRect(countBarX, countBarY, barWidth, countBarH);
                                     if (isHoverCount) {{
-                                        ctx.strokeStyle = "#111827";
+                                        ctx.strokeStyle = dashboardColor("--color-ink", "#1f2937");
                                         ctx.lineWidth = 2;
                                         ctx.strokeRect(countBarX, countBarY, barWidth, countBarH);
                                         ctx.lineWidth = 1;
@@ -8638,7 +10047,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                     ctx.fillStyle = amountColor;
                                     ctx.fillRect(amountBarX, amountBarY, barWidth, amountBarH);
                                     if (isHoverAmount) {{
-                                        ctx.strokeStyle = "#111827";
+                                        ctx.strokeStyle = dashboardColor("--color-ink", "#1f2937");
                                         ctx.lineWidth = 2;
                                         ctx.strokeRect(amountBarX, amountBarY, barWidth, amountBarH);
                                         ctx.lineWidth = 1;
@@ -8654,7 +10063,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                 var axisLabel = useSdgSpecific ? ("SDG " + countrySelectedSdgIndex + " Score") : "SDG Index Score";
                                 var yTicks = [0, 25, 50, 75, 100];
                                 var yScale = 100;
-                                ctx.strokeStyle = "#e5e7eb";
+                                ctx.strokeStyle = dashboardColor("--color-divider", "#e5e7eb");
                                 ctx.lineWidth = 1;
                                 ctx.setLineDash([4, 4]);
                                 for (var ti = 0; ti < yTicks.length; ti++) {{
@@ -8666,7 +10075,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                     ctx.stroke();
                                 }}
                                 ctx.setLineDash([]);
-                                ctx.fillStyle = "#111827";
+                                ctx.fillStyle = dashboardColor("--color-ink", "#1f2937");
                                 ctx.font = "600 14px 'Segoe UI', sans-serif";
                                 ctx.textAlign = "left";
                                 ctx.textBaseline = "middle";
@@ -8690,7 +10099,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                         ctx.lineTo(lineChartPoints[pi].x, lineChartPoints[pi].y);
                                     }}
                                     ctx.stroke();
-                                    ctx.fillStyle = "#fafafa";
+                                    ctx.fillStyle = dashboardColor("--color-surface-muted", "#f8fafc");
                                     ctx.strokeStyle = lineColor;
                                     ctx.lineWidth = 3;
                                     for (var pi = 0; pi < lineChartPoints.length; pi++) {{
@@ -9011,18 +10420,27 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             }}
             attachCountryDrag(cMin, true);
             attachCountryDrag(cMax, false);
+            }});
         }});
 
         (function() {{
-            var d3s = document.createElement("script");
-            d3s.src = "https://cdn.jsdelivr.net/npm/d3@7";
-            d3s.onload = function() {{
-                var tjs = document.createElement("script");
-                tjs.src = "https://cdn.jsdelivr.net/npm/topojson@3";
-                document.head.appendChild(tjs);
-            }};
-            document.head.appendChild(d3s);
+            document.addEventListener("keydown", function(e) {{
+                if (e.key !== "Enter" && e.key !== " ") return;
+                var t = e.target;
+                if (!t) return;
+                if (t.getAttribute("role") === "switch" && t.getAttribute("tabindex") === "0") {{
+                    e.preventDefault();
+                    var track = t.querySelector(".switch-track");
+                    if (track) track.click();
+                    return;
+                }}
+                if (t.getAttribute("role") === "button" && t.getAttribute("tabindex") === "0") {{
+                    e.preventDefault();
+                    t.click();
+                }}
+            }});
         }})();
+
     </script>
     {peer_review_footer}
 </body>
