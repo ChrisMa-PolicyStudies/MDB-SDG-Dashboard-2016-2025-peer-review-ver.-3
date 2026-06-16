@@ -1,0 +1,9044 @@
+﻿"""
+Dashboard HTML generator — current (29008-row) layout.
+
+Sidebar: 11 MDB buttons (WBG, IFC, ADB, …). Loads data/*.json; by_mdb indices match sidebar order.
+"""
+import json
+import math
+import os
+import urllib.request
+from typing import Dict, List, Optional
+
+from mdb_pipeline_config import CONFIG, DATA_DIR, FY26_INCOME_GROUPS_JSON, MDB_ORGANIZATIONS, MDB_SIDEBAR_ORDER
+# Order in by_mdb[1..] before reorder (build pipeline order)
+MDB_DATA_ORGS = MDB_ORGANIZATIONS
+MDB_SIDEBAR_LOGOS = {
+    "WBG": "Logo-World-Bank-IBRD-IDA.svg.png",
+    "IFC": "International_Finance_Corporation_logo.svg.png",
+    "ADB": "MDB_Logo_ADB.png",
+    "AfDB": "MDB_Logo_AfDB.png",
+    "IDB": "MDB_Logo_IDB.png",
+    "IsDB": "MDB_Logo_IsDB.png",
+    "CEB": "MDB_Logo_CEB.jpg",
+    "EBRD": "MDB_Logo_EBRD.png",
+    "EIB": "MDB_Logo_EIB.png",
+    "AIIB": "MDB_Logo_AIIB.png",
+    "NDB": "MDB_Logo_NDB.png",
+}
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets")
+PIPELINE = CONFIG
+SDG_TOTALS_JSON = PIPELINE.out_path("sdg_totals")
+
+
+def _ensure_derived_data() -> None:
+    """Verify pre-built data/*.json exist (GitHub repo ships these; no CSV rebuild)."""
+    required = [
+        SDG_TOTALS_JSON,
+        PIPELINE.out_path("country_totals"),
+        PIPELINE.out_path("most_relevant_sdg"),
+        PIPELINE.out_path("sdg_cooccurrence_conditional"),
+        PIPELINE.out_path("mdb_amount_histogram"),
+        PIPELINE.out_path("mr_chord_flows"),
+        PIPELINE.out_path("mr_amount_samples"),
+        os.path.join(DATA_DIR, "sdg_index.json"),
+        os.path.join(DATA_DIR, "countries-110m.json"),
+        FY26_INCOME_GROUPS_JSON,
+    ]
+    missing = [os.path.basename(p) for p in required if not os.path.isfile(p)]
+    if missing:
+        raise FileNotFoundError(f"Missing required data files in data/: {', '.join(missing)}")
+
+
+def _reorder_by_mdb_list(by_mdb: list, orgs_in_data: Optional[List[str]] = None) -> list:
+    """by_mdb[0]=all MDBs; reorder by_mdb[1..] to MDB_SIDEBAR_ORDER."""
+    if not by_mdb:
+        return by_mdb
+    orgs = orgs_in_data or list(MDB_DATA_ORGS)
+    out = [by_mdb[0]]
+    for org in MDB_SIDEBAR_ORDER:
+        out.append(by_mdb[orgs.index(org) + 1])
+    return out
+
+
+def _reorder_payload_with_by_mdb(data: dict) -> dict:
+    if not data or "by_mdb" not in data:
+        return data
+    orgs = data.get("mdb_organizations") or list(MDB_DATA_ORGS)
+    out = dict(data)
+    out["by_mdb"] = _reorder_by_mdb_list(data["by_mdb"], orgs)
+    out["mdb_organizations"] = list(MDB_SIDEBAR_ORDER)
+    return out
+
+
+def _reorder_country_totals(data: dict) -> dict:
+    """country_totals.by_mdb has one entry per MDB (no combined slot); reorder to sidebar."""
+    if not data or "by_mdb" not in data:
+        return data
+    orgs = data.get("mdb_organizations") or list(MDB_DATA_ORGS)
+    by_mdb = data["by_mdb"]
+    out = dict(data)
+    out["by_mdb"] = [by_mdb[orgs.index(org)] for org in MDB_SIDEBAR_ORDER]
+    out["mdb_organizations"] = list(MDB_SIDEBAR_ORDER)
+    return out
+
+
+def _load_sdg_totals():
+    _ensure_derived_data()
+    with open(SDG_TOTALS_JSON, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_mdb_totals():
+    """Per-MDB sdg_totals in sidebar order (for MDB_TOTALS[sidebarIndex - 1])."""
+    _ensure_derived_data()
+    out = []
+    suffix = PIPELINE.output_suffix
+    for org in MDB_SIDEBAR_ORDER:
+        path = os.path.join(DATA_DIR, f"sdg_totals_{org}{suffix}.json")
+        with open(path, "r", encoding="utf-8") as f:
+            out.append(json.load(f))
+    return out
+
+
+def _load_json_payload(path: str, default: Optional[dict] = None) -> dict:
+    if not os.path.isfile(path):
+        return default or {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_mdb_amount_histogram() -> dict:
+    """Load mdb_amount_histogram.json (per-project amounts for MDB slide 3)."""
+    _ensure_derived_data()
+    return _load_json_payload(
+        PIPELINE.out_path("mdb_amount_histogram"),
+        {
+            "years": list(range(2016, 2026)),
+            "mdb_sidebar_order": list(MDB_SIDEBAR_ORDER),
+            "projects": [],
+        },
+    )
+
+
+def _load_mr_chord_flows() -> dict:
+    """Load mr_chord_flows.json (MR → co-tagged SDG flow counts)."""
+    _ensure_derived_data()
+    return _load_json_payload(
+        PIPELINE.out_path("mr_chord_flows"),
+        {"years": list(range(2016, 2026)), "by_mdb": []},
+    )
+
+
+def _load_mr_amount_samples() -> dict:
+    """Load mr_amount_samples.json (MR-grouped project amount samples)."""
+    _ensure_derived_data()
+    return _load_json_payload(
+        PIPELINE.out_path("mr_amount_samples"),
+        {"years": list(range(2016, 2026)), "by_mdb": []},
+    )
+
+
+def _load_country_totals():
+    """Load country_totals.json; by_mdb reordered to sidebar."""
+    _ensure_derived_data()
+    country_path = PIPELINE.out_path("country_totals")
+    with open(country_path, "r", encoding="utf-8") as f:
+        return _reorder_country_totals(json.load(f))
+
+
+def _load_sdg_index():
+    """Load sdg_index.json."""
+    sdg_index_path = os.path.join(DATA_DIR, "sdg_index.json")
+    if not os.path.exists(sdg_index_path):
+        print("Warning: missing sdg_index.json")
+        return {"countries": {}, "country_codes": []}
+    with open(sdg_index_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _safe_float(v):
+    try:
+        x = float(v)
+        if not math.isfinite(x):
+            return None
+        return x
+    except (TypeError, ValueError):
+        return None
+
+
+def _l2_normalize(vec):
+    norm = math.sqrt(sum((x * x) for x in vec))
+    if norm <= 0:
+        return None
+    return [x / norm for x in vec]
+
+
+from mdb_country_need_project_cosine import build_country_need_project_cosine as _build_country_need_project_cosine
+
+
+def _load_country_fy26_income_groups(project_root: str) -> Dict[str, str]:
+    """FY26 World Bank income group per ISO alpha-3 (OGHIST + documented gap fills)."""
+    from ogh_income_groups import load_fy26_income_groups
+
+    return load_fy26_income_groups(project_root)
+
+
+def _load_sdg_cooccurrence():
+    """Load sdg_cooccurrence_conditional.json for the co-occurrence heatmap."""
+    path = PIPELINE.out_path("sdg_cooccurrence_conditional")
+    if not os.path.exists(path):
+        print(f"Warning: missing {os.path.basename(path)}")
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return _reorder_payload_with_by_mdb(json.load(f))
+
+
+def _iso_numeric_to_alpha2():
+    """Build mapping ISO 3166-1 numeric (str) -> alpha_2 for world-atlas TopoJSON."""
+    try:
+        import pycountry
+        out = {}
+        for c in pycountry.countries:
+            if c.numeric:
+                out[str(c.numeric)] = c.alpha_2
+        return out
+    except Exception:
+        return {}
+
+
+def _alpha2_to_alpha3():
+    """Build mapping ISO 3166-1 alpha_2 -> alpha_3."""
+    try:
+        import pycountry
+        out = {}
+        for c in pycountry.countries:
+            if c.alpha_2 and c.alpha_3:
+                out[c.alpha_2] = c.alpha_3
+        return out
+    except Exception:
+        return {}
+
+
+def _alpha3_to_alpha2():
+    """Build mapping ISO 3166-1 alpha_3 -> alpha_2."""
+    try:
+        import pycountry
+        out = {}
+        for c in pycountry.countries:
+            if c.alpha_2 and c.alpha_3:
+                out[c.alpha_3] = c.alpha_2
+        return out
+    except Exception:
+        return {}
+
+
+def _alpha3_to_country_name():
+    """Build mapping ISO 3166-1 alpha_3 -> country name for display."""
+    try:
+        import pycountry
+        return {c.alpha_3: c.name for c in pycountry.countries if c.alpha_3}
+    except Exception:
+        return {}
+
+
+def _load_country_topology():
+    """Load TopoJSON for world map. Prefer countries-110m.json (smaller). Embed in HTML to avoid fetch from file://."""
+    for name in ("countries-110m.json", "countries-10m.json"):
+        path = os.path.join(DATA_DIR, name)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    return None
+
+
+def _load_most_relevant_sdg():
+    """Load most_relevant_sdg.json; by_mdb reordered to sidebar."""
+    path = PIPELINE.out_path("most_relevant_sdg")
+    if not os.path.exists(path):
+        return {"by_mdb": [], "years": list(range(2016, 2026))}
+    with open(path, "r", encoding="utf-8") as f:
+        return _reorder_payload_with_by_mdb(json.load(f))
+
+
+ACKNOWLEDGEMENT_BODY_FULL = """
+                                <p>The MDB-SDG Dashboard is a by-product of one of my ongoing research projects. It was originally designed to facilitate analysis for that study, but it soon occurred to me that it might also offer valuable insights to fellow researchers seeking a broad overview of MDBs' operations across the Sustainable Development Goals.</p>
+                                <p>I would like to extend my special thanks to four individuals: Dr. Yixin Yao, my former supervisor at ADBI, who encouraged me to explore MDB documentation; Dr. Daniel Suryadarma and Dr. Dil Rahut, my other supervisors at ADBI, who had strong faith in me and gave me the freedom to pursue my research; and Dr. John W. McArthur, a participant at the ADBI Annual Conference 2023. Organizing the conference and transforming his presentation into <a href="https://www.adb.org/publications/striving-to-meet-the-sustainable-development-goals-next-steps-for-policymakers-and-practitioners" target="_blank" rel="noopener">a policy note</a> turned me from an SDG skeptic into a practitioner. Yes, the SDGs may soon reach their target year; they will be updated, and a new framework will emerge. However, having a unifying framework for sustainable development is of invaluable importance in practice, and studying it can help inform future efforts.</p>
+                                <p>I also want to express my gratitude to my dearest friends: Mr. Charles Liu, a superb web engineer, who always manages to catch my bugs; and Dr. Eric Miao, who helped me test the Dashboard.</p>
+"""
+
+ACKNOWLEDGEMENT_BODY_PEER = """
+                                <p>Hidden for the peer-review version.</p>
+"""
+
+ABOUT_SIGNATURE_HTML = """
+                            <div class="about-signature">
+                                Shengchi (Christopher) Ma<br/>
+                                <span class="about-date">Feb 20, 2026</span>
+                            </div>
+"""
+
+
+def _peer_review_head_extra() -> str:
+    return """
+    <style id="peer-review-styles">
+        body.peer-review-dashboard-body {
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+        body.peer-review-dashboard-body * {
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+        body.peer-review-dashboard-body img {
+            -webkit-user-drag: none;
+            user-drag: none;
+        }
+        #peer-review-watermark {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 2147483647;
+            pointer-events: none;
+            overflow: visible;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+        }
+    </style>
+"""
+
+
+def _peer_review_watermark_html() -> str:
+    """Inline SVG pattern overlay — composites with page paint (survives Win+Shift+S capture)."""
+    return """
+    <svg id="peer-review-watermark" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"
+         preserveAspectRatio="none">
+      <defs>
+        <pattern id="peer-review-wm-pattern" width="1330" height="770" patternUnits="userSpaceOnUse">
+          <text x="343" y="290" transform="rotate(-32 343 290)" font-family="Segoe UI, system-ui, sans-serif" font-size="70" font-weight="800" letter-spacing="0.03em" fill="rgba(90,90,90,0.30)" text-anchor="middle">For Peer Review</text>
+          <text x="960" y="565" transform="rotate(-32 960 565)" font-family="Segoe UI, system-ui, sans-serif" font-size="70" font-weight="800" letter-spacing="0.03em" fill="rgba(90,90,90,0.30)" text-anchor="middle">For Peer Review</text>
+        </pattern>
+      </defs>
+      <rect x="0" y="0" width="100%" height="100%" fill="url(#peer-review-wm-pattern)"/>
+    </svg>
+"""
+
+
+def _peer_review_guard_script() -> str:
+    """Basic deterrent: context menu, copy, common shortcuts (see user note on limitations)."""
+    return """
+    <script id="peer-review-guard">
+    (function() {
+        function blockContextMenu(e) {
+            e.preventDefault();
+            return false;
+        }
+        function blockCopy(e) {
+            e.preventDefault();
+            return false;
+        }
+        function blockKey(e) {
+            var key = e.key || "";
+            var k = key.toLowerCase();
+            if (key === "F12" || e.keyCode === 123) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                return false;
+            }
+            if (e.ctrlKey || e.metaKey) {
+                if (k === "u" || k === "s" || k === "c" || k === "a" || k === "x" || k === "p") {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    return false;
+                }
+                if (e.shiftKey && (k === "i" || k === "j")) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    return false;
+                }
+            }
+        }
+        document.addEventListener("contextmenu", blockContextMenu, true);
+        window.addEventListener("contextmenu", blockContextMenu, true);
+        document.addEventListener("copy", blockCopy, true);
+        document.addEventListener("cut", blockCopy, true);
+        document.addEventListener("paste", blockCopy, true);
+        document.addEventListener("keydown", blockKey, true);
+        window.addEventListener("keydown", blockKey, true);
+        document.addEventListener("selectstart", function(e) { e.preventDefault(); }, true);
+        document.addEventListener("dragstart", function(e) { e.preventDefault(); }, true);
+    })();
+    </script>
+"""
+
+
+def generate_html(output_path: str, *, peer_review: bool = False, peer_review_lite: bool = False) -> None:
+    """
+    Generate a simple HTML dashboard with:
+    - Left: 11 vertically stacked MDB logo buttons (sidebar layout)
+    - Right: charts/maps using data/*.json (by_mdb aligned to sidebar order)
+
+    If peer_review=True: watermark, restricted About acknowledgement, copy/UI guards.
+    If peer_review_lite=True (implies peer_review): fewer sliders/views for external review.
+    """
+    # Base directory of this script
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Paths (project root = one level above src)
+    project_root = os.path.abspath(os.path.join(base_dir, os.pardir))
+    output_dir = os.path.dirname(output_path)
+    logos_dir = os.path.join(ASSETS_DIR, "MDB logos")
+    dashboard_logo_dir = os.path.join(ASSETS_DIR, "Dashboard logo")
+    sdg_icons_dir = os.path.join(ASSETS_DIR, "E SDG Icons WEB")
+    sdg_inverted_dir = os.path.join(ASSETS_DIR, "E Inverted Icons WEB")
+    sdg_crop_dir = os.path.join(ASSETS_DIR, "E SDG Icons WEB Crop")
+
+    # Sidebar: 11 MDBs in display order (logos under assets/MDB logos)
+    buttons_html = []
+    for idx, org in enumerate(MDB_SIDEBAR_ORDER, start=1):
+        filename = MDB_SIDEBAR_LOGOS[org]
+        logo_path = os.path.join(logos_dir, filename)
+        rel_logo_path = os.path.relpath(logo_path, output_dir).replace(os.sep, "/")
+
+        logo_sm_class = " mdb-logo-inset" if org in ("WBG", "IFC") else ""
+
+        if not os.path.exists(logo_path):
+            img_tag = f'<div class="btn-label">{org}</div>'
+        else:
+            img_tag = f'<img src="{rel_logo_path}" alt="{org}" class="btn-image" />'
+
+        buttons_html.append(
+            f"""
+            <button class="mdb-button{logo_sm_class}" type="button" data-mdb-index="{idx}" data-mdb-code="{org}" onclick="showNumber({idx})" title="{org}">
+                {img_tag}
+            </button>
+            """
+        )
+
+    buttons_html_str = "\n".join(buttons_html)
+
+    # Home logo and SDG icon paths (relative to output HTML; use / for URLs)
+    def _rel(s: str) -> str:
+        return os.path.relpath(s, output_dir).replace(os.sep, "/")
+
+    home_logo_path = _rel(os.path.join(dashboard_logo_dir, "home.png"))
+    sdg_wheel_dir = os.path.join(ASSETS_DIR, "SDG Wheel WEB")
+    sdg_wheel_path = _rel(os.path.join(sdg_wheel_dir, "SDG Wheel_Transparent_WEB.png")) if os.path.exists(os.path.join(sdg_wheel_dir, "SDG Wheel_Transparent_WEB.png")) else ""
+    sdg_crop_paths = [
+        _rel(os.path.join(sdg_crop_dir, f"E-WEB-Goal-{i:02d}_Crop Image.png"))
+        for i in range(1, 18)
+    ]
+    sdg_ring_crop_path = _rel(os.path.join(sdg_crop_dir, "E-WEB-Goal-Ring_Crop Image.png"))
+    home_pointer_ring_path = _rel(os.path.join(ASSETS_DIR, "E Inverted Icons WEB Crop", "E Inverted Icons_WEB-Ring_Crop Image.png"))
+    sdg_inverted_paths = []
+    for i in range(1, 18):
+        sdg_inverted_paths.append(_rel(os.path.join(sdg_inverted_dir, f"E Inverted Icons_WEB-{i:02d}.png")))
+    sdg_inverted_paths.append(_rel(os.path.join(sdg_inverted_dir, "global-goals.png")))
+    sdg_country_logos_html = "\n".join(
+        f'<div class="map-sdg-logo-wrap" data-sdg-index="{i + 1}" role="button" tabindex="0" title="SDG {i + 1}"><img src="{path}" alt="SDG {i + 1}" /></div>'
+        if i < 17 else
+        f'<div class="map-sdg-logo-wrap map-sdg-logo-global" data-sdg-index="0" role="button" tabindex="0" title="All SDGs"><img src="{path}" alt="SDG All" /></div>'
+        for i, path in enumerate(sdg_inverted_paths)
+    )
+    sdg_icon_paths = [
+        _rel(os.path.join(sdg_icons_dir, f"E-WEB-Goal-{i:02d}.png"))
+        for i in range(1, 18)
+    ]
+    e_sdg_logo_dir = os.path.join(ASSETS_DIR, "E SDG logo WEB")
+    e_sdg_logo_path = _rel(os.path.join(e_sdg_logo_dir, "E_SDG_logo_Square_Transparent_WEB.png")) if os.path.exists(os.path.join(e_sdg_logo_dir, "E_SDG_logo_Square_Transparent_WEB.png")) else ""
+    home_sdg_legend_html_row1 = "".join(
+        f'<div class="home-sdg-legend-item" data-sdg-index="{i+1}"><img src="{sdg_crop_paths[i]}" alt="SDG {i+1}" title="SDG {i+1}" /></div>'
+        for i in range(9)
+    )
+    home_sdg_legend_html_row2 = "".join(
+        f'<div class="home-sdg-legend-item" data-sdg-index="{i+1}"><img src="{sdg_crop_paths[i]}" alt="SDG {i+1}" title="SDG {i+1}" /></div>'
+        for i in range(9, 17)
+    )
+    if e_sdg_logo_path:
+        home_sdg_legend_html_row2 += f'<div class="home-sdg-legend-item home-sdg-legend-e-logo" data-sdg-index="0"><img src="{e_sdg_logo_path}" alt="SDGs" title="Sustainable Development Goals" /></div>'
+    # Official UN SDG colors (hex) for goals 1–17
+    sdg_colors = [
+        "#E5233D", "#DDA73A", "#4CA146", "#C5192D", "#EF402C", "#27BFE6",
+        "#FBC412", "#A31C44", "#F26A2D", "#E01483", "#F89D2A", "#BF8D2C",
+        "#407F46", "#0A97D9", "#56C02B", "#00689D", "#19486A",
+    ]
+    sdg_gradient_border = "linear-gradient(to right, " + ", ".join(sdg_colors) + ")"
+    sdg_conic_border = "conic-gradient(from 0deg, " + ", ".join([f"{sdg_colors[i]} {i*360/17:.2f}deg" for i in range(17)]) + f", {sdg_colors[0]} 360deg)"
+    sdg_totals = _load_sdg_totals()
+    mdb_totals_list = _load_mdb_totals()
+    country_totals = _load_country_totals()
+    sdg_index = _load_sdg_index()
+    iso_numeric_to_alpha2 = _iso_numeric_to_alpha2()
+    alpha2_to_alpha3 = _alpha2_to_alpha3()
+    alpha3_to_alpha2 = _alpha3_to_alpha2()
+    alpha3_to_country_name = _alpha3_to_country_name()
+    country_topology = _load_country_topology()
+    most_relevant_sdg = _load_most_relevant_sdg()
+    sdg_cooccurrence = _load_sdg_cooccurrence()
+    country_fy26_income_groups = _load_country_fy26_income_groups(project_root)
+    country_need_project_similarity = _build_country_need_project_cosine(
+        country_totals=country_totals,
+        sdg_index=sdg_index,
+        years=list(range(2016, 2026)),
+        include_vectors=True,
+    )
+    mdb_amount_histogram = _load_mdb_amount_histogram()
+    sdg_totals_js = json.dumps(sdg_totals)
+    mdb_totals_js = json.dumps(mdb_totals_list)
+    mdb_names_js = json.dumps(MDB_SIDEBAR_ORDER)
+    country_totals_js = json.dumps(country_totals)
+    sdg_index_js = json.dumps(sdg_index)
+    iso_numeric_to_alpha2_js = json.dumps(iso_numeric_to_alpha2)
+    country_names_js = json.dumps(alpha3_to_country_name)
+    alpha2_to_alpha3_js = json.dumps(alpha2_to_alpha3)
+    alpha3_to_alpha2_js = json.dumps(alpha3_to_alpha2)
+    # 内嵌 TopoJSON，避免在 file:// 下 fetch 失败（浏览器会拦截本地文件请求）
+    country_topology_js = json.dumps(country_topology) if country_topology else "null"
+    most_relevant_sdg_js = json.dumps(most_relevant_sdg)
+    sdg_cooccurrence_js = json.dumps(sdg_cooccurrence) if sdg_cooccurrence else "null"
+    country_need_project_similarity_js = json.dumps(country_need_project_similarity)
+    country_fy26_income_js = json.dumps(_load_country_fy26_income_groups(PROJECT_ROOT))
+    mdb_amount_histogram_js = json.dumps(mdb_amount_histogram)
+    mr_chord_flows = _load_mr_chord_flows()
+    mr_amount_samples = _load_mr_amount_samples()
+    mr_chord_flows_js = json.dumps(mr_chord_flows)
+    mr_amount_samples_js = json.dumps(mr_amount_samples)
+    home_chord_ring_path_js = json.dumps(sdg_ring_crop_path)
+    sdg_icon_paths_js = json.dumps(sdg_icon_paths)
+    sdg_crop_paths_js = json.dumps(sdg_crop_paths)
+    home_pointer_ring_path_js = json.dumps(home_pointer_ring_path)
+    sdg_colors_js = json.dumps(sdg_colors)
+    # UN official short titles for the 17 SDGs (for display in titles)
+    SDG_GOAL_NAMES = [
+        "No Poverty", "Zero Hunger", "Good Health and Well-being", "Quality Education",
+        "Gender Equality", "Clean Water and Sanitation", "Affordable and Clean Energy",
+        "Decent Work and Economic Growth", "Industry, Innovation and Infrastructure",
+        "Reduced Inequalities", "Sustainable Cities and Communities",
+        "Responsible Consumption and Production", "Climate Action", "Life Below Water",
+        "Life on Land", "Peace, Justice and Strong Institutions", "Partnerships for the Goals",
+    ]
+    sdg_goal_names_js = json.dumps(SDG_GOAL_NAMES)
+    # MDB square chart axes: left Y = SDG crop icons top-to-bottom 2px gap; bottom X = same icons rotated 90° CW, left-to-right 2px gap. Ref home size 108x48.
+    mdb_axis_icon_w = 108
+    mdb_axis_icon_h = 48
+    mdb_axis_gap = 2
+    mdb_left_axis_html = "".join(
+        f'<div class="mdb-axis-y-item" data-sdg-index="{i}" role="button" tabindex="0" title="Select row SDG {i+1}"><img src="{sdg_crop_paths[i]}" alt="SDG {i+1}" /></div>'
+        for i in range(17)
+    )
+    mdb_bottom_axis_html = "".join(
+        f'<div class="mdb-axis-x-item" data-sdg-index="{i}" role="button" tabindex="0" title="Select column SDG {i+1}"><img src="{sdg_crop_paths[i]}" alt="SDG {i+1}" /></div>'
+        for i in range(17)
+    )
+    mdb_global_logo_path = sdg_inverted_paths[-1] if sdg_inverted_paths else ""
+
+    if peer_review_lite:
+        peer_review = True
+
+    page_title = (
+        "MDB-SDG Dashboard (Peer Review — Lite)"
+        if peer_review_lite
+        else "MDB-SDG Dashboard (Peer Review)"
+        if peer_review
+        else "MDB-SDG Dashboard (Prototype)"
+    )
+    html_root_class = ' class="peer-review-dashboard' + (' dashboard-lite' if peer_review_lite else '') + '"' if peer_review else ""
+    body_peer_attrs = (
+        ' class="peer-review-dashboard-body" oncontextmenu="return false;"'
+        ' oncopy="return false;" oncut="return false;" onselectstart="return false;"'
+        if peer_review
+        else ""
+    )
+    peer_review_head_extra = _peer_review_head_extra() if peer_review else ""
+    peer_review_watermark_html = _peer_review_watermark_html() if peer_review else ""
+    peer_review_footer = _peer_review_guard_script() if peer_review else ""
+    acknowledgement_body_html = (
+        ACKNOWLEDGEMENT_BODY_PEER if peer_review else ACKNOWLEDGEMENT_BODY_FULL
+    )
+    about_signature_html = "" if peer_review else ABOUT_SIGNATURE_HTML
+    peer_review_lite_js = "true" if peer_review_lite else "false"
+    lite_css = """
+        .dashboard-lite .home-slide-3,
+        .dashboard-lite .home-slide-5,
+        .dashboard-lite .mdb-slide-3,
+        .dashboard-lite .mdb-slide-4,
+        .dashboard-lite #home-chord-center-label,
+        .dashboard-lite #country-arrow-left-zero {
+            display: none !important;
+        }
+    """ if peer_review_lite else ""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en"{html_root_class}>
+<head>
+    <meta charset="UTF-8" />
+    <title>{page_title}</title>
+    {peer_review_head_extra}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        {lite_css}
+        body {{
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #f5f5f7;
+        }}
+
+        .page {{
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            padding: 0 100px;
+            box-sizing: border-box;
+        }}
+
+        .dashboard-inner {{
+            width: 1740px;
+            min-width: 1740px;
+            margin: 0 auto;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }}
+
+        .nav {{
+            height: 112px;
+            background: #ffffff;
+            display: flex;
+            align-items: stretch;
+            flex-shrink: 0;
+        }}
+
+        .nav-inner {{
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 2px solid #9ca3af;
+            box-sizing: border-box;
+        }}
+
+        .nav-home {{
+            display: flex;
+            align-items: center;
+            padding: 8px 0;
+            border-radius: 8px;
+            transition: background 0.15s;
+            margin-left: 20px;
+            cursor: pointer;
+        }}
+        .nav-home:hover {{
+            background: rgba(0,0,0,0.04);
+        }}
+        .nav-home img {{
+            height: 110px;
+            width: auto;
+            display: block;
+        }}
+
+        .nav-links {{
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            margin-right: 25px;
+        }}
+        .nav-links a {{
+            color: #111827;
+            font-size: 18px;
+            font-weight: 700;
+            padding: 10px 20px;
+            border-radius: 6px;
+            text-decoration: none;
+            cursor: pointer;
+        }}
+        .nav-links a:hover {{
+            background: rgba(17,24,39,0.06);
+        }}
+        .nav-links a.active {{
+            background: rgba(37,99,235,0.12);
+            color: #1d4ed8;
+        }}
+
+        .main-row {{
+            display: flex;
+            flex: 1;
+            min-height: 0;
+            width: 100%;
+            padding: 6px 0 24px 0;
+            box-sizing: border-box;
+            gap: 100px;
+        }}
+
+        /* 与 chart-wrapper、map-wrapper 统一高度 1100px；纵向向上 10px：margin-top 14px（手动调此处） */
+        .sidebar {{
+            width: 240px;
+            height: 1100px;
+            min-height: 1100px;
+            background-color: #111827;
+            padding: 12px 12px 12px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            border-radius: 16px;
+            align-self: flex-start;
+            margin-top: 14px;
+        }}
+
+        /* space-between + small block padding: top/bottom slightly less than space-around */
+        .buttons-wrapper {{
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            justify-content: space-between;
+            padding-block: 16px;
+            min-height: 0;
+            box-sizing: border-box;
+        }}
+
+        .mdb-button {{
+            width: 100%;
+            flex: 0 0 auto;
+            aspect-ratio: 3.15 / 1;
+            max-height: 82px;
+            border-radius: 8px;
+            border: 1px solid #d1d5db;
+            background-color: #ffffff;
+            cursor: pointer;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.08s ease-out, box-shadow 0.08s ease-out, border-color 0.08s;
+            overflow: hidden;
+        }}
+
+        .mdb-button:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
+            border-color: #9ca3af;
+        }}
+
+        .mdb-button:active {{
+            transform: translateY(0);
+        }}
+
+        /* Selected: white fill + blue border/ring (all MDB buttons, including WBG/IFC) */
+        .mdb-button.selected {{
+            border-color: #1d4ed8;
+            box-shadow: 0 0 0 4px rgba(37,99,235,0.55);
+            background: #ffffff;
+        }}
+
+        .btn-image {{
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background-color: #ffffff;
+        }}
+
+        /* WBG / IFC: logo at 80%; same selected style as other MDBs (no full-button blue fill) */
+        .mdb-button.mdb-logo-inset .btn-image {{
+            width: 80%;
+            height: 80%;
+            max-width: 80%;
+            max-height: 80%;
+            background-color: #ffffff;
+        }}
+
+        .btn-label {{
+            color: #374151;
+            font-size: 18px;
+            font-weight: 600;
+        }}
+
+        .content {{
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            justify-content: center;
+            background-color: #f5f5f7;
+            padding: 24px 0 24px 0;
+            box-sizing: border-box;
+            min-width: 0;
+            mask-image: none;
+            -webkit-mask-image: none;
+        }}
+
+        .charts-panel {{
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            width: 100%;
+            margin: 0 auto;
+            align-items: flex-end;
+        }}
+
+        /* 与主页 home-right-wrapper 一致 1400px；纵向与主页/Country 一致：margin-top -10px */
+        .mdb-chart-row {{
+            position: relative;
+            display: flex;
+            align-items: center;
+            width: 1400px;
+            min-width: 1400px;
+            margin-top: -10px;
+        }}
+
+        /* 与主页一致 1400px；圆角与 chart-wrapper 一致，避免裁切圆角；无右侧变淡/模糊 */
+        .mdb-slider-wrapper {{
+            width: 1400px;
+            min-width: 1400px;
+            overflow: hidden;
+            position: relative;
+            border-radius: 12px;
+            mask-image: none;
+            -webkit-mask-image: none;
+        }}
+        /* 去掉 MDB Finance by SDG 默认页 chart-wrapper 右侧变淡/模糊 */
+        #mdb-panel .chart-wrapper {{
+            mask-image: none;
+            -webkit-mask-image: none;
+            filter: none;
+        }}
+        #mdb-panel .chart-wrapper::after,
+        #mdb-panel .chart-wrapper::before {{
+            display: none !important;
+            content: none !important;
+        }}
+        #mdb-panel .mdb-slider-wrapper::after,
+        #mdb-panel .mdb-slider-wrapper::before {{
+            display: none !important;
+            content: none !important;
+        }}
+
+        .mdb-arrow {{
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(107, 114, 128, 0.35);
+            color: #fff;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s, transform 0.15s;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 5;
+        }}
+
+        .mdb-arrow:hover {{
+            background: rgba(55, 65, 81, 0.5);
+        }}
+
+        .mdb-arrow-icon {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+
+        .mdb-arrow-icon svg {{
+            display: block;
+        }}
+
+        .mdb-arrow-left {{
+            left: -75px;
+            top: 50%;
+            transform: translateY(-50%);
+        }}
+
+        .mdb-arrow-left.visible {{
+            display: flex;
+        }}
+
+        .mdb-arrow-right {{
+            left: calc(100% + 25px);
+            top: 50%;
+            transform: translateY(-50%);
+        }}
+
+        .mdb-arrow-right.visible {{
+            display: flex;
+        }}
+
+        .mdb-arrow-left:hover {{
+            transform: translateY(-50%) scale(1.05);
+        }}
+
+        .mdb-arrow-right:hover {{
+            transform: translateY(-50%) scale(1.05);
+        }}
+
+        .mdb-slider {{
+            display: flex;
+            width: 5600px;
+            transition: transform 0.4s ease;
+        }}
+
+        .mdb-slider.mdb-slide-pos-0 {{
+            transform: translateX(0);
+        }}
+        .mdb-slider.mdb-slide-pos-1 {{
+            transform: translateX(-1400px);
+        }}
+        .mdb-slider.mdb-slide-pos-2 {{
+            transform: translateX(-2800px);
+        }}
+        .mdb-slider.mdb-slide-pos-3 {{
+            transform: translateX(-4200px);
+        }}
+
+        /* 与主页一致 1400px；padding-top 补偿 chart-wrapper margin-top:-10px 避免顶部被裁切 */
+        .mdb-slide-1 {{
+            display: flex;
+            flex-direction: column;
+            width: 1400px;
+            min-width: 1400px;
+            flex-shrink: 0;
+            padding-top: 10px;
+        }}
+
+        /* 第一屏 chart 区域与主页同宽 1400px，绘图区随容器自适应 */
+        .mdb-slide-1 .chart-wrapper {{
+            width: 100%;
+            box-sizing: border-box;
+            overflow: visible;
+        }}
+        .mdb-slide-1 .chart-wrapper .chart-container {{
+            width: 100%;
+            flex: 1;
+            min-width: 0;
+            overflow: visible;
+        }}
+        /* 确保 mdb-slide-1 的 chart-wrapper 右边清晰可见，无变淡效果 */
+        #mdb-panel .mdb-slide-1 .chart-wrapper {{
+            overflow: visible;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }}
+        #mdb-panel .mdb-slide-1 .chart-wrapper::after,
+        #mdb-panel .mdb-slide-1 .chart-wrapper::before {{
+            display: none !important;
+            content: none !important;
+        }}
+
+        .mdb-slide-2 {{
+            display: flex;
+            flex-direction: column;
+            width: 1400px;
+            min-width: 1400px;
+            flex-shrink: 0;
+        }}
+
+        .mdb-slide-3 {{
+            display: flex;
+            flex-direction: column;
+            width: 1400px;
+            min-width: 1400px;
+            flex-shrink: 0;
+            padding-top: 10px;
+        }}
+
+        .mdb-slide-3 .mdb-amount-hist-container {{
+            height: 520px;
+            max-width: 1100px;
+            margin: 0 auto;
+            position: relative;
+        }}
+        #mdb-amount-back-btn {{
+            top: 16px;
+            right: 16px;
+            left: auto;
+            bottom: auto;
+            z-index: 12;
+        }}
+
+        .mdb-slide-3 .mdb-amount-hist-note {{
+            margin: 12px auto 0;
+            max-width: 900px;
+            font-size: 13px;
+            color: #6b7280;
+            text-align: center;
+        }}
+
+        .mdb-slide-4 {{
+            display: flex;
+            flex-direction: column;
+            width: 1400px;
+            min-width: 1400px;
+            flex-shrink: 0;
+            height: 1100px;
+            padding: 0 24px 0 24px;
+            box-sizing: border-box;
+            overflow: hidden;
+            border-radius: 12px;
+        }}
+        #mdb-panel .mdb-slide-4 .home-pie-title-area {{
+            flex-shrink: 0;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 8px;
+        }}
+        #mdb-panel .mdb-slide-4 .home-pie-title-area .chart-title {{
+            margin: 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+            text-align: center;
+        }}
+        #mdb-panel .mdb-slide-4 .home-pie-wrap {{
+            flex: 1;
+            min-height: 0;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 1352px;
+            max-width: 100%;
+            padding-bottom: 42px; /* small footer space for two buttons */
+            box-sizing: border-box;
+            background: transparent;
+            border-radius: 12px;
+        }}
+        #mdb-panel .mdb-slide-4 .home-pie-wrap canvas {{
+            display: block;
+        }}
+        /* Scope chord buttons by id: a shared .chart-back-btn rule would beat #mdb-chord-layout-btn
+           and force left:20px on both, stacking Mode on Back and stealing clicks. */
+        #mdb-panel .mdb-slide-4 .home-pie-wrap #mdb-chord-back-btn {{
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 21;
+        }}
+        #mdb-panel .mdb-slide-4 .home-pie-wrap #mdb-chord-layout-btn {{
+            position: absolute;
+            bottom: 20px;
+            right: 14px;
+            left: auto;
+            z-index: 20;
+            min-width: 168px;
+            justify-content: center;
+            padding: 0 12px;
+        }}
+        #mdb-chord-center-label.home-pie-center-label {{
+            left: 14px;
+            top: 12px;
+            transform: none;
+            text-align: left;
+            max-width: min(420px, 92%);
+        }}
+        #mdb-chord-center-label .home-pie-center-total {{
+            font-size: 28px;
+        }}
+        #mdb-chord-center-label .home-pie-center-hint {{
+            font-size: 15px;
+            margin-top: 4px;
+        }}
+
+        .mdb-square-chart-wrapper {{
+            height: 1100px;
+            margin-top: -10px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            background: #fff;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }}
+
+        .mdb-square-chart-wrapper .chart-title {{
+            flex-shrink: 0;
+            margin: 0 0 16px 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+            text-align: center;
+        }}
+
+        .mdb-square-chart-wrapper .chart-container {{
+            width: 906px;
+            max-width: 100%;
+            min-width: 0;
+            margin-left: auto;
+            margin-right: auto;
+            background: #fafafa;
+            border-radius: 16px;
+            overflow: hidden;
+            box-sizing: border-box;
+        }}
+
+        .mdb-square-chart-inner {{
+            display: grid;
+            grid-template-columns: 125px 200px 108px 872px;
+            grid-template-rows: 866px 108px;
+            gap: 2px;
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            overflow: hidden;
+            box-sizing: border-box;
+            margin-top: 8px;
+        }}
+
+        .mdb-square-chart-spacer-left {{
+            grid-column: 1;
+            grid-row: 1 / -1;
+        }}
+
+        .mdb-coocc-left-col {{
+            grid-column: 2;
+            grid-row: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: flex-start;
+            padding-right: 12px;
+            padding-top: 32px;
+            box-sizing: border-box;
+            position: relative;
+        }}
+
+        .mdb-coocc-read-help-col {{
+            flex-shrink: 0;
+            width: 100%;
+        }}
+
+        .mdb-coocc-detail-info {{
+            flex-shrink: 0;
+            width: 225px;
+            margin-left: -50px;
+            display: none;
+            background: rgba(17, 24, 39, 0.92);
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.4;
+            margin-top: 62px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            box-sizing: border-box;
+        }}
+
+        .mdb-coocc-detail-info.visible {{
+            display: block;
+        }}
+
+        .mdb-coocc-row2-left {{
+            grid-column: 2;
+            grid-row: 2;
+            height: 108px;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: space-between;
+            padding-right: 12px;
+            box-sizing: border-box;
+            position: relative;
+        }}
+
+        .mdb-coocc-row2-left .mdb-coocc-legend-block {{
+            flex-shrink: 0;
+            align-self: flex-start;
+            margin-top: -50px;
+            margin-left: 62.5px;  /* 与文字说明区域中心对齐：文字说明宽度225px，margin-left -50px，中心位置(-50+225)/2=62.5px */
+            transform: translateX(-50%);  /* 让色阶图例的中心对齐到文字说明区域的中心 */
+        }}
+
+        .mdb-coocc-row2-left .mdb-coocc-back-all-wrapper {{
+            flex-shrink: 0;
+            margin-top: auto;
+            align-self: flex-start;
+            align-items: flex-start;
+            padding-bottom: 0;
+            justify-content: flex-start;
+            margin-bottom: 25px;
+            margin-left: 62.5px;  /* 与文字说明区域中心对齐 */
+            transform: translateX(-50%);  /* 让back按钮的中心对齐到文字说明区域的中心 */
+        }}
+
+        .mdb-coocc-read-help-col .mdb-coocc-read-help {{
+            position: static;
+            width: 225px;
+            margin-left: -50px;  /* 文字说明区域左边距，手动调试可改此行（约第672行） */
+            box-sizing: border-box;
+        }}
+
+        .mdb-axis-y-wrap {{
+            grid-column: 3;
+            grid-row: 1;
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            padding-top: 12px;
+        }}
+
+        .mdb-axis-y-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }}
+
+        .mdb-axis-y-item {{
+            width: 108px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }}
+
+        .mdb-axis-y-item img {{
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            display: block;
+        }}
+
+        .mdb-square-plot-wrap {{
+            grid-column: 4;
+            grid-row: 1;
+            width: 872px;
+            height: 866px;
+            background: #fafafa;
+            box-sizing: border-box;
+        }}
+
+        .mdb-square-plot-area {{
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }}
+
+        .mdb-coocc-read-help {{
+            font-size: 14px;
+            line-height: 1.45;
+            color: #334155;
+            background: #f8fafc;
+            padding: 12px 14px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }}
+
+        .mdb-coocc-legend-block {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            width: 100%;
+            max-width: 276px;
+            box-sizing: border-box;
+        }}
+
+        .mdb-coocc-legend-block .mdb-coocc-legend-label {{
+            font-size: 14px;
+            font-weight: 700;
+            color: #1e293b;
+        }}
+
+        .mdb-coocc-legend-bar {{
+            width: 100%;
+            max-width: 276px;
+            height: 20px;
+            border-radius: 4px;
+            border: 1px solid #64748b;
+            background: linear-gradient(to right, #E8E8EC 0%, #8A8A8A 50%, #2F2F35 100%);
+            box-sizing: border-box;
+        }}
+
+        .mdb-coocc-legend-values {{
+            font-size: 14px;
+            font-weight: 700;
+            color: #374151;
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+            max-width: 276px;
+            box-sizing: border-box;
+        }}
+
+        .mdb-coocc-back-all-wrapper {{
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            align-items: flex-start;
+            margin-top: auto;
+            padding-bottom: 32px;
+            width: 100%;
+            box-sizing: border-box;
+        }}
+
+        .mdb-coocc-back-all-wrapper .chart-back-btn {{
+            position: static;
+            bottom: auto;
+            left: auto;
+            z-index: 3;
+        }}
+
+        #mdb-cooccurrence-canvas {{
+            display: block;
+            width: 100%;
+            height: 100%;
+        }}
+
+        .mdb-cooccurrence-tooltip {{
+            position: absolute;
+            pointer-events: none;
+            display: none;
+            background: rgba(17, 24, 39, 0.92);
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.4;
+            max-width: 200px;
+            z-index: 10;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        }}
+
+        .mdb-cooccurrence-tooltip.visible {{
+            display: block;
+        }}
+
+        .mdb-cooccurrence-fixed-tooltip {{
+            position: absolute;
+            display: none;
+            background: rgba(17, 24, 39, 0.94);
+            color: #fff;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.5;
+            max-width: 320px;
+            z-index: 12;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+            pointer-events: none;
+        }}
+
+        .mdb-cooccurrence-fixed-tooltip.visible {{
+            display: block;
+        }}
+
+        .mdb-axis-y-item, .mdb-axis-x-item {{
+            cursor: pointer;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }}
+
+        .mdb-axis-y-item.highlight, .mdb-axis-x-item.highlight {{
+            transform: scale(1.05);
+            border-radius: 4px;
+        }}
+
+        .mdb-axis-y-item img, .mdb-axis-x-item img {{
+            pointer-events: none;
+        }}
+
+        .mdb-axis-spacer {{
+            grid-column: 3;
+            grid-row: 2;
+            width: 108px;
+            height: 108px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+
+        .mdb-axis-spacer-global {{
+            width: 92px;
+            height: 92px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+        }}
+
+        .mdb-axis-spacer-global:hover {{
+            transform: scale(1.12);
+        }}
+
+        .mdb-axis-spacer-global img {{
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }}
+
+        .mdb-axis-x-wrap {{
+            grid-column: 4;
+            grid-row: 2;
+            display: flex;
+            align-items: flex-start;
+            justify-content: flex-start;
+            padding-left: 12px;
+            padding-top: 0;
+            box-sizing: border-box;
+            height: 108px;
+            overflow: visible;
+        }}
+
+        .mdb-axis-x-list {{
+            display: flex;
+            flex-direction: row;
+            gap: 2px;
+            margin: 0;
+            padding: 0;
+            width: 848px;
+            flex-shrink: 0;
+            margin-top: 4px;
+        }}
+
+        .mdb-axis-x-item {{
+            width: 48px;
+            height: 108px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }}
+
+        .mdb-axis-x-item img {{
+            width: 108px;
+            height: 48px;
+            max-width: none;
+            max-height: none;
+            object-fit: contain;
+            display: block;
+            transform: rotate(90deg);
+        }}
+
+        /* 与 sidebar、map-wrapper 统一高度 1100px；纵向向上 10px：margin-top -10px（手动调此处） */
+        .chart-wrapper {{
+            height: 1100px;
+            margin-top: -10px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            background: #fff;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }}
+
+        /* 标题字号与 Explore by Country 页面一致（以 Country 为参考） */
+        .chart-wrapper .chart-title {{
+            flex-shrink: 0;
+            margin: 0 0 16px 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+            text-align: center;
+        }}
+
+        /* 绘图区域固定宽度：1400px，高度由 wrapper 剩余空间填充 */
+        .chart-wrapper .chart-container {{
+            position: relative;
+            flex: 1;
+            min-height: 0;
+            width: 1400px;
+            background: #fafafa;
+            overflow: hidden;
+            border-radius: 16px;
+        }}
+
+        /* 背景 canvas，用于绘制上下两个bar chart和坐标轴 */
+        #sdg-canvas {{
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+        }}
+
+        /* SDG logos 容器 - 独立视觉元素，覆盖在canvas之上 */
+        .sdg-logos-container {{
+            position: absolute;
+            left: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 100%;
+            height: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 4px;
+            padding: 0 100px;
+            box-sizing: border-box;
+            z-index: 1;
+        }}
+
+        .sdg-logo-item {{
+            flex-shrink: 0;
+        }}
+
+        .sdg-logo-item img {{
+            display: block;
+        }}
+
+        /* 自定义 tooltip，用于鼠标悬停显示数值 */
+        .sdg-tooltip {{
+            position: absolute;
+            padding: 6px 10px;
+            border-radius: 4px;
+            background: rgba(17, 24, 39, 0.94);
+            color: #f9fafb;
+            font-size: 12px;
+            font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+            white-space: nowrap;
+            pointer-events: none;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            z-index: 2;
+            display: none;
+        }}
+
+        /* 年份范围滑块区域 */
+        .year-slider-panel {{
+            margin-top: 18px;
+            padding: 12px 8px 0;
+        }}
+        /* Explore by Country 页：滑块整体向上 10px（手动调此处：改 margin-top 数值） */
+        #country-panel .map-wrapper .year-slider-panel {{
+            margin-top: 8px;
+        }}
+
+        /* Explore by Country：滑块下方 18 个 SDG logo（9×2）；整体下移 10px：padding-top 24px（手动调此处） */
+        #country-panel .map-wrapper .map-wrapper-sdg-logos {{
+            display: grid;
+            grid-template-columns: repeat(9, 1fr);
+            gap: 14px 16px;
+            margin: 0 40px;
+            padding: 24px 0 0;
+            box-sizing: border-box;
+        }}
+        #country-panel .map-wrapper .map-sdg-logo-wrap {{
+            aspect-ratio: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            max-width: 88px;
+            max-height: 88px;
+            margin: 0 auto;
+        }}
+        #country-panel .map-wrapper .map-sdg-logo-wrap img {{
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            transition: transform 0.2s ease;
+        }}
+        #country-panel .map-wrapper .map-sdg-logo-wrap:hover img {{
+            transform: scale(1.12);
+        }}
+        #country-panel .map-wrapper .map-sdg-logo-wrap {{
+            cursor: pointer;
+        }}
+        #country-panel .map-wrapper .map-sdg-logo-wrap.selected {{
+            outline: 2px solid #2563eb;
+            outline-offset: 2px;
+            border-radius: 4px;
+        }}
+        #country-panel .map-wrapper .map-sdg-logo-global img {{
+            object-fit: contain;
+        }}
+
+        .year-slider-label {{
+            font-size: 14px;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 6px;
+        }}
+        .year-slider-ticks span {{
+            cursor: pointer;
+            user-select: none;
+        }}
+        .year-range-label-reset {{
+            cursor: pointer;
+        }}
+        .year-range-label-reset:hover {{
+            color: #2563eb;
+        }}
+
+        .year-slider-track {{
+            position: relative;
+            height: 40px;
+            margin: 0 40px 8px;
+        }}
+
+        .year-slider-rail {{
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            height: 4px;
+            border-radius: 999px;
+            background: #e5e7eb;
+        }}
+
+        .year-slider-range {{
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            height: 4px;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #2563eb, #16a34a);
+        }}
+
+        .year-slider-handle {{
+            position: absolute;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #ffffff;
+            border: 2px solid #2563eb;
+            box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
+            cursor: pointer;
+        }}
+
+        .year-slider-handle:hover {{
+            box-shadow: 0 0 0 3px rgba(37,99,235,0.25);
+        }}
+
+        .year-slider-ticks {{
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 50%;
+            transform: translateY(16px);
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            font-weight: 600;
+            color: #111827;
+        }}
+
+        .number-panel {{
+            display: none;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+        }}
+
+        .number-panel.visible {{
+            display: flex;
+        }}
+
+        .charts-panel.hidden {{
+            display: none;
+        }}
+
+        .number-display {{
+            font-size: 160px;
+            font-weight: 800;
+            color: #111827;
+            text-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }}
+
+        /* 多视图面板：Home / MDB / Country / About */
+        .view-panel {{
+            display: none;
+            flex: 1;
+            flex-direction: column;
+            min-width: 0;
+            background-color: #f5f5f7;
+            padding: 24px 0;
+            box-sizing: border-box;
+            align-items: center;
+            justify-content: center;
+        }}
+        .view-panel.active {{
+            display: flex;
+        }}
+        #home-panel {{
+            align-items: flex-end;
+        }}
+        .home-right-wrapper {{
+            width: 1400px;
+            min-width: 1400px;
+            height: 1100px;
+            margin: -10px 0 0 auto;
+            display: flex;
+            flex-direction: column;
+            background: #fff;
+            border-radius: 12px;
+            padding: 0 24px 0 24px;
+            box-sizing: border-box;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        }}
+        .home-chart-row {{
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: stretch;
+            position: relative;
+            width: 1400px;
+            min-width: 1400px;
+            margin-left: -24px;
+            margin-right: -24px;
+        }}
+        .home-arrow {{
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(107, 114, 128, 0.35);
+            color: #fff;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s, transform 0.15s;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 5;
+        }}
+        .home-arrow:hover {{
+            background: rgba(55, 65, 81, 0.5);
+        }}
+        .home-arrow-icon {{ display: flex; align-items: center; justify-content: center; }}
+        .home-arrow-icon svg {{ display: block; }}
+        .home-arrow-left {{
+            left: -75px;
+            top: 50%;
+            transform: translateY(-50%);
+        }}
+        .home-arrow-left.visible {{ display: flex; }}
+        .home-arrow-right {{
+            left: calc(100% + 25px);
+            top: 50%;
+            transform: translateY(-50%);
+        }}
+        .home-arrow-right.visible {{ display: flex; }}
+        .home-arrow-left:hover {{ transform: translateY(-50%) scale(1.05); }}
+        .home-arrow-right:hover {{ transform: translateY(-50%) scale(1.05); }}
+        .home-slider-wrapper {{
+            flex: 1;
+            width: 1400px;
+            min-width: 1400px;
+            overflow: hidden;
+            position: relative;
+            border-radius: 12px;
+        }}
+        .home-slider {{
+            display: flex;
+            height: 100%;
+            width: 7000px;
+            transition: transform 0.4s ease;
+        }}
+        .home-slider.slide-2 {{
+            transform: translateX(-1400px);
+        }}
+        .home-slider.slide-3 {{
+            transform: translateX(-2800px);
+        }}
+        .home-slider.slide-4 {{
+            transform: translateX(-4200px);
+        }}
+        .home-slider.slide-5 {{
+            transform: translateX(-5600px);
+        }}
+        .home-slide-1 {{
+            width: 1400px;
+            flex-shrink: 0;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }}
+        .home-slide-2 {{
+            width: 1400px;
+            flex-shrink: 0;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            padding: 0 24px 0 24px;
+            box-sizing: border-box;
+            overflow: hidden;
+            border-radius: 12px;
+        }}
+        .home-slide-3,
+        .home-slide-4,
+        .home-slide-5 {{
+            width: 1400px;
+            flex-shrink: 0;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            padding: 0 24px 0 24px;
+            box-sizing: border-box;
+            overflow: hidden;
+            border-radius: 12px;
+        }}
+        .home-slide-3 .home-pie-title-area,
+        .home-slide-4 .home-pie-title-area,
+        .home-slide-5 .home-pie-title-area {{
+            flex-shrink: 0;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 8px;
+        }}
+        .home-slide-3 .home-pie-wrap,
+        .home-slide-4 .home-pie-wrap,
+        .home-slide-5 .home-pie-wrap {{
+            background: transparent;
+            border-radius: 12px;
+        }}
+        #home-pointer-year-ticks span {{
+            cursor: pointer;
+            user-select: none;
+            opacity: 0.7;
+        }}
+        #home-pointer-year-ticks span.active {{
+            opacity: 1;
+            color: #2563eb;
+        }}
+        .home-slide-2 .home-pie-title-area,
+        .home-slide-3 .home-pie-title-area,
+        .home-slide-4 .home-pie-title-area,
+        .home-slide-5 .home-pie-title-area {{
+            flex-shrink: 0;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 8px;
+        }}
+        .home-slide-2 .home-pie-title-area .chart-title,
+        .home-slide-3 .home-pie-title-area .chart-title,
+        .home-slide-4 .home-pie-title-area .chart-title,
+        .home-slide-5 .home-pie-title-area .chart-title {{
+            margin: 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+            text-align: center;
+        }}
+        .home-slide-2 .home-pie-wrap {{
+            background: #fafafa;
+            border-radius: 12px;
+        }}
+        .home-pie-wrap {{
+            flex: 1;
+            min-height: 0;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 1352px;
+            max-width: 100%;
+            box-sizing: border-box;
+        }}
+        .home-pie-wrap canvas {{
+            display: block;
+        }}
+        .home-pie-wrap .chart-back-btn {{
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 10;
+        }}
+        .home-pie-wrap .map-metric-switch {{
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 10;
+        }}
+        .home-pie-center-hint.bold {{
+            font-weight: 600;
+        }}
+        .home-pie-center-label {{
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            pointer-events: none;
+        }}
+        .home-pie-center-total {{
+            font-size: 38px;
+            font-weight: 700;
+            color: #111827;
+            display: block;
+        }}
+        .home-pie-center-hint {{
+            font-size: 18px;
+            color: #6b7280;
+            margin-top: 6px;
+        }}
+        #home-chord-center-label.home-pie-center-label {{
+            left: 14px;
+            top: 12px;
+            transform: none;
+            text-align: left;
+            max-width: min(420px, 92%);
+        }}
+        #home-chord-center-label .home-pie-center-total {{
+            font-size: 28px;
+        }}
+        #home-chord-center-label .home-pie-center-hint {{
+            font-size: 15px;
+            margin-top: 4px;
+        }}
+        .home-pie-tooltip {{
+            position: absolute;
+            padding: 8px 12px;
+            border-radius: 6px;
+            background: rgba(17,24,39,0.92);
+            color: #f9fafb;
+            font-size: 12px;
+            pointer-events: none;
+            display: none;
+            z-index: 10;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }}
+        #home-panel .home-year-slider-panel {{
+            margin-top: -2px;
+            padding: 12px 8px 20px 8px;
+            flex-shrink: 0;
+            background: transparent;
+        }}
+        .home-welcome-block {{
+            flex-shrink: 0;
+            min-height: 200px;
+            margin-top: 16px;
+            padding: 0 24px;
+            box-sizing: border-box;
+        }}
+        .home-welcome-block.hidden {{
+            display: none;
+        }}
+        .home-welcome-first-row {{
+            display: inline-flex;
+            align-items: center;
+            gap: 16px;
+        }}
+        .home-welcome-first-line {{
+            font-size: 22px;
+            font-weight: 700;
+            color: #111827;
+            line-height: 1.4;
+        }}
+        .home-sdg-wheel-img {{
+            height: 1.4em;
+            width: auto;
+            vertical-align: middle;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }}
+        .home-sdg-wheel-img:hover {{
+            transform: scale(1.05);
+        }}
+        @keyframes home-sdg-wheel-spin {{
+            from {{ transform: rotate(0deg); }}
+            to {{ transform: rotate(360deg); }}
+        }}
+        @keyframes home-sdg-wheel-spin-slowdown {{
+            0% {{ transform: rotate(0deg); }}
+            12% {{ transform: rotate(720deg); }}
+            100% {{ transform: rotate(1080deg); }}
+        }}
+        .home-sdg-wheel-img.spin {{
+            animation: home-sdg-wheel-spin 0.5s linear infinite;
+        }}
+        .home-sdg-wheel-img.spin-slowdown {{
+            animation: home-sdg-wheel-spin-slowdown 10s ease-out forwards;
+        }}
+        .home-welcome-text {{
+            margin: 0;
+            font-size: 18px;
+            line-height: 1.7;
+            color: #374151;
+            max-width: 100%;
+        }}
+        .home-welcome-text br {{
+            line-height: 0.5;
+            font-size: 8px;
+        }}
+        .home-welcome-text .home-term {{
+            color: #1d4ed8;
+            font-weight: 700;
+        }}
+        .home-welcome-text .home-link {{
+            color: #2563eb;
+            font-weight: 600;
+            text-decoration: none;
+            border-bottom: 1px solid rgba(37,99,235,0.4);
+            cursor: pointer;
+        }}
+        .home-welcome-text .home-link:hover {{
+            border-bottom-color: #2563eb;
+        }}
+        .home-chart-area {{
+            flex-shrink: 0;
+            width: 1352px;
+            height: 670px;
+            display: flex;
+            flex-direction: column;
+            background: #fafafa;
+            border-radius: 12px;
+            margin-top: 16px;
+            margin-left: auto;
+            margin-right: auto;
+            box-sizing: border-box;
+        }}
+        .home-chart-area.expanded {{
+            height: 870px;
+        }}
+        .home-chart-title-area {{
+            flex-shrink: 0;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 8px;
+            background: #fff;
+        }}
+        .home-chart-title {{
+            margin: 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+            text-align: center;
+        }}
+        .home-stack-chart-wrap {{
+            flex-shrink: 0;
+            width: 1352px;
+            height: 630px;
+            position: relative;
+            box-sizing: border-box;
+        }}
+        .home-chart-area.expanded .home-stack-chart-wrap {{
+            height: 830px;
+        }}
+        #home-stack-canvas {{
+            display: block;
+            width: 100%;
+            height: 100%;
+        }}
+        .home-legend-and-totals {{
+            display: flex;
+            width: 1352px;
+            min-height: 118px;
+            align-items: stretch;
+            flex-shrink: 0;
+            margin-top: 15px;
+            margin-bottom: 25px;
+            gap: 30px;
+            box-sizing: border-box;
+        }}
+        .home-sdg-legend {{
+            flex-shrink: 0;
+            width: 1132px;
+            min-height: 110px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 14px;
+            padding: 0;
+            background: #fff;
+            box-sizing: border-box;
+        }}
+        .home-sdg-legend-row {{
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+            gap: 20px;
+        }}
+        .home-sdg-legend-row:first-child {{
+            width: 100%;
+        }}
+        .home-sdg-legend-row:last-child {{
+            justify-content: flex-start;
+        }}
+        .home-sdg-legend-item.home-sdg-legend-e-logo {{
+            width: 108px;
+            height: 48px;
+        }}
+        .home-sdg-legend-item.home-sdg-legend-e-logo img {{
+            height: 48px;
+            width: auto;
+            max-width: 100%;
+            object-fit: contain;
+        }}
+        .home-totals-block-wrap {{
+            flex-shrink: 0;
+            width: calc(1352px - 1132px - 30px);
+            padding: 3px;
+            border-radius: 12px;
+            background: var(--home-totals-border-gradient);
+            box-sizing: border-box;
+        }}
+        .home-totals-block {{
+            min-width: 0;
+            padding: 2px;
+            background: #fff;
+            border-radius: 10px;
+            box-sizing: border-box;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }}
+        .home-totals-projects, .home-totals-amount {{
+            font-size: 16px;
+            font-weight: 600;
+            color: #111827;
+            line-height: 1.5;
+            margin: 0;
+        }}
+        .home-totals-block #home-totals-projects-n,
+        .home-totals-block #home-totals-amount-n {{
+            font-weight: 700;
+        }}
+        .home-sdg-legend-item {{
+            width: 108px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }}
+        .home-sdg-legend-item.selected {{
+            outline: 2px solid #2563eb;
+            outline-offset: 2px;
+            border-radius: 4px;
+        }}
+        .home-sdg-legend-item.chord-selected {{
+            outline: 2px solid #0f766e;
+            outline-offset: 2px;
+            border-radius: 4px;
+        }}
+        #home-chord-layout-btn {{
+            right: 14px;
+            left: auto;
+            min-width: 168px;
+            justify-content: center;
+            padding: 0 12px;
+        }}
+        .home-sdg-legend-item img {{
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+        }}
+        #home-chart-tooltip {{
+            position: absolute;
+            padding: 8px 12px;
+            border-radius: 6px;
+            background: rgba(17,24,39,0.92);
+            color: #f9fafb;
+            font-size: 12px;
+            pointer-events: none;
+            display: none;
+            z-index: 10;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }}
+        #country-panel {{
+            align-items: flex-end;
+        }}
+        .country-map-row {{
+            display: flex;
+            align-items: center;
+            margin: -10px 0 0 0;
+        }}
+        .country-arrow {{
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(107, 114, 128, 0.35);
+            color: #fff;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s, transform 0.15s;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            top: 50%;
+            transform: translateY(-50%);
+        }}
+        .country-arrow:hover {{
+            background: rgba(55, 65, 81, 0.5);
+        }}
+        .country-arrow-icon {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .country-arrow-icon svg {{
+            display: block;
+        }}
+        .country-arrow-left {{
+            left: -75px;
+            top: 50%;
+            transform: translateY(-50%);
+        }}
+        .country-arrow-left.visible {{
+            display: flex;
+        }}
+        .country-arrow-right {{
+            left: calc(100% + 25px);
+            top: 50%;
+            transform: translateY(-50%);
+        }}
+        .country-arrow-right.visible {{
+            display: flex;
+        }}
+        .country-arrow-left:hover {{
+            transform: translateY(-50%) scale(1.05);
+        }}
+        .country-arrow-right:hover {{
+            transform: translateY(-50%) scale(1.05);
+        }}
+        .country-arrow-left:active {{
+            transform: translateY(-50%) scale(0.98);
+        }}
+        .country-arrow-right:active {{
+            transform: translateY(-50%) scale(0.98);
+        }}
+        .country-map-outer {{
+            position: relative;
+        }}
+        /* padding-top 补偿 map-wrapper margin-top:-10px，避免上边两倒角被裁切；圆角与 map-wrapper 一致；高度 1110 以容纳 padding 后内容区仍 1100 */
+        .country-map-content {{
+            width: 1400px;
+            min-width: 1400px;
+            height: 1110px;
+            min-height: 1110px;
+            overflow: hidden;
+            position: relative;
+            border-radius: 12px;
+            padding-top: 10px;
+            box-sizing: border-box;
+        }}
+        .country-map-slider {{
+            display: flex;
+            width: 4200px;
+            transition: transform 0.4s ease;
+        }}
+        .country-map-slider.slide-2 {{
+            transform: translateX(-1400px);
+        }}
+        .country-map-slider.slide-3 {{
+            transform: translateX(-2800px);
+        }}
+        #country-panel .map-wrapper .country-map-slider {{
+            flex: 1;
+            min-height: 0;
+            width: 4200px;
+            flex-shrink: 0;
+        }}
+        .country-slide-1 {{
+            display: flex;
+            flex-direction: column;
+            width: 1400px;
+            min-width: 1400px;
+            flex-shrink: 0;
+            height: 100%;
+        }}
+        .country-slide-2 {{
+            display: flex;
+            flex-direction: column;
+            width: 1400px;
+            min-width: 1400px;
+            flex-shrink: 0;
+            height: 100%;
+        }}
+        .country-slide-3 {{
+            display: flex;
+            flex-direction: column;
+            width: 1400px;
+            min-width: 1400px;
+            flex-shrink: 0;
+            height: 100%;
+        }}
+        .country-radar-chart-title {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 13px 0;
+            padding: 0 50px 0 50px;
+            flex-shrink: 0;
+        }}
+        .country-radar-chart-title .chart-title {{
+            margin: 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+        }}
+        .country-slide-2 .chart-container {{
+            position: relative;
+            width: 100%;
+            flex: 1;
+            min-height: 0;
+            margin: 0 auto;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #fafafa;
+            box-sizing: border-box;
+        }}
+        .country-slide-3 .chart-container {{
+            position: relative;
+            width: 100%;
+            flex: 1;
+            min-height: 0;
+            margin: 0 auto;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #fafafa;
+            box-sizing: border-box;
+        }}
+        .country-radar-wrap {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }}
+        #country-radar-ring-canvas {{
+            display: block;
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
+        }}
+        #country-radar-chart-container .map-metric-switch {{
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 10;
+        }}
+        .country-barchart-title-row {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 13px 0;
+            padding: 0 50px 0 50px;
+            flex-shrink: 0;
+        }}
+        .country-barchart-title-row .chart-title {{
+            margin: 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+        }}
+        .barchart-container {{
+            position: relative;
+            width: 100%;
+            flex: 1;
+            min-height: 0;
+            margin: 0 auto;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #fafafa;
+            box-sizing: border-box;
+        }}
+        #country-barchart-canvas {{
+            display: block;
+            width: 100%;
+            height: 100%;
+        }}
+        #country-radar-tooltip {{
+            position: absolute;
+            padding: 8px 12px;
+            border-radius: 6px;
+            background: rgba(17,24,39,0.92);
+            color: #f9fafb;
+            font-size: 12px;
+            pointer-events: none;
+            display: none;
+            z-index: 1000;
+            white-space: nowrap;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }}
+        #country-barchart-tooltip {{
+            position: absolute;
+            padding: 8px 12px;
+            border-radius: 6px;
+            background: rgba(17,24,39,0.92);
+            color: #f9fafb;
+            font-size: 12px;
+            pointer-events: none;
+            display: none;
+            z-index: 1000;
+            white-space: nowrap;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }}
+        #country-panel .map-wrapper path.country.selected {{
+            stroke: #1d4ed8;
+            stroke-width: 2.5px;
+        }}
+        .view-panel.plain {{
+            padding: 48px 24px;
+            text-align: center;
+        }}
+        #about-panel {{
+            align-self: stretch;
+            justify-content: flex-start;
+            padding-top: 80px;
+        }}
+        .view-panel.plain .maintenance {{
+            font-size: 24px;
+            font-weight: 600;
+            color: #6b7280;
+        }}
+        .view-panel.plain .about-block {{
+            font-size: 18px;
+            color: #374151;
+            line-height: 1.8;
+        }}
+        .about-acknowledgement {{
+            max-width: 720px;
+            margin: 0 auto;
+            text-align: left;
+        }}
+        .about-acknowledgement h2 {{
+            font-size: 22px;
+            font-weight: 700;
+            color: #111827;
+            margin: 0 0 16px 0;
+        }}
+        .about-acknowledgement-body {{
+            margin-bottom: 20px;
+        }}
+        .about-acknowledgement-body p {{
+            margin: 0 0 14px 0;
+        }}
+        .about-acknowledgement-body p:last-child {{
+            margin-bottom: 0;
+        }}
+        .about-acknowledgement-body a {{
+            color: #2563eb;
+            font-weight: 600;
+            text-decoration: none;
+            border-bottom: 1px solid rgba(37,99,235,0.4);
+        }}
+        .about-acknowledgement-body a:hover {{
+            border-bottom-color: #2563eb;
+        }}
+        .about-signature {{
+            margin-top: 24px;
+            font-weight: 600;
+            color: #111827;
+        }}
+        .about-signature .about-date {{
+            font-weight: 400;
+            color: #6b7280;
+        }}
+        .main-row.hide-sidebar .sidebar {{
+            display: none;
+        }}
+        .main-row .content-views {{
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            align-items: flex-end;
+        }}
+
+        /* Bar chart 画布内返回按钮（单 MDB 时显示） */
+        .chart-back-btn {{
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            z-index: 3;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 14px;
+            border-radius: 8px;
+            border: 1px solid #d1d5db;
+            background: #fff;
+            color: #374151;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            transition: background 0.15s, box-shadow 0.15s;
+        }}
+        .chart-back-btn.visible {{
+            display: flex;
+        }}
+        /* Home slide-0 stack chart only: raise Back to all MDBs */
+        .home-stack-chart-wrap #home-chart-back-btn {{
+            bottom: 72px;
+        }}
+        .chart-back-btn:hover {{
+            background: #f3f4f6;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+        }}
+        .chart-back-btn-icon, .country-back-btn-icon {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .chart-back-btn-icon svg, .country-back-btn-icon svg {{
+            display: block;
+        }}
+
+        /* 开关、图例、Back 按钮同一父元素，缩放时相对位置不变 */
+        #country-panel .map-overlay-panel {{
+            position: absolute;
+            left: 12px;
+            bottom: 12px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 10px;
+            min-height: 120px;
+        }}
+        #country-panel .map-legend-block {{
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 4px;
+        }}
+        #country-panel .map-legend-label {{
+            font-size: 14px;
+            font-weight: 700;
+            color: #1e293b;
+        }}
+        #country-panel .map-legend-bar {{
+            width: 220px;
+            height: 20px;
+            border-radius: 4px;
+            border: 1px solid #64748b;
+            background: linear-gradient(to right, #E8E8EC, #8A8A8A, #2F2F35);
+        }}
+        #country-panel .map-legend-values {{
+            font-size: 14px;
+            font-weight: 700;
+            color: #374151;
+            display: flex;
+            justify-content: space-between;
+            width: 220px;
+        }}
+        #country-panel .map-income-legend {{
+            display: none;
+            flex-direction: column;
+            gap: 3px;
+            padding: 8px 10px;
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font-size: 11px;
+            color: #334155;
+            box-sizing: border-box;
+        }}
+        /* Fig. 6 alignment map only — leftmost country slider (slide -1) */
+        #country-panel .map-overlay-panel.cosine-legend-mode {{
+            left: 62px;
+            bottom: 62px;
+            display: grid;
+            gap: 10px;
+            width: max-content;
+            min-height: 0;
+        }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-legend-block {{
+            align-items: stretch;
+            width: 100%;
+            box-sizing: border-box;
+        }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-legend-label {{
+            text-align: center;
+        }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-legend-bar {{
+            width: 100%;
+            box-sizing: border-box;
+        }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-legend-values {{
+            width: 100%;
+        }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-income-legend {{
+            width: 100%;
+        }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-income-legend-row span:last-child {{
+            font-weight: 700;
+        }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-income-swatch {{
+            background: #fff !important;
+            border-width: 2px;
+            border-style: solid;
+            border-color: #bdbdbd;
+        }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-income-legend-row:nth-child(2) .map-income-swatch {{ border-color: #d73027; }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-income-legend-row:nth-child(3) .map-income-swatch {{ border-color: #fc8d59; }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-income-legend-row:nth-child(4) .map-income-swatch {{ border-color: #4575b4; }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-income-legend-row:nth-child(5) .map-income-swatch {{ border-color: #1a9850; }}
+        #country-panel .map-overlay-panel.cosine-legend-mode .map-income-legend-row:nth-child(6) .map-income-swatch {{ border-color: #bdbdbd; }}
+        #country-panel .map-income-legend-title {{
+            font-weight: 700;
+            font-size: 13px;
+            color: #1e293b;
+            margin-bottom: 2px;
+        }}
+        #country-panel .map-income-legend-row {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            line-height: 1.25;
+        }}
+        #country-panel .map-income-swatch {{
+            width: 14px;
+            height: 10px;
+            border-radius: 2px;
+            border: 1px solid rgba(0, 0, 0, 0.12);
+            flex-shrink: 0;
+        }}
+        #country-panel .country-back-btn {{
+            display: none;
+            align-items: center;
+            padding: 8px 14px;
+            border-radius: 8px;
+            border: 1px solid #d1d5db;
+            background: #fff;
+            color: #374151;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }}
+        #country-panel .country-back-btn.visible {{
+            display: flex;
+        }}
+        #country-panel .country-back-btn:hover {{
+            background: #f3f4f6;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+        }}
+
+        /* 与 chart-wrapper、sidebar 统一高度 1100px；定值纵向与左侧 MDB 栏对齐：margin-top -10px（手动调此处）；右对齐与 nav 灰线右端 */
+        #country-panel .map-wrapper {{
+            background: #fff;
+            border-radius: 12px;
+            padding: 0 0 24px 0;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            width: 1400px;
+            min-width: 1400px;
+            height: 1100px;
+            margin: -10px 0 0 auto;
+            box-sizing: border-box;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }}
+        .country-map-title-row {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 13px 0;
+            padding: 0 50px 0 50px;
+            flex-shrink: 0;
+        }}
+        #country-panel .map-wrapper .country-map-title-row .chart-title {{
+            margin: 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+        }}
+        .country-map-title-hint {{
+            font-size: 12px;
+            color: #9ca3af;
+        }}
+        #country-panel .map-container {{
+            position: relative;
+            width: 1400px;
+            min-width: 1400px;
+            height: 700px;
+            margin: 0 auto;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #fff;
+            box-sizing: border-box;
+        }}
+        #country-panel #country-map {{
+            width: 1400px;
+            height: 700px;
+        }}
+        #country-map-svg {{
+            display: block;
+            width: 1400px;
+            height: 700px;
+            background: #fff;
+        }}
+        #country-panel .map-metric-switch, .home-pie-wrap .map-metric-switch {{
+            display: flex;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            align-items: center;
+            gap: 12px;
+            background: rgba(255,255,255,0.95);
+            padding: 8px 14px;
+            border-radius: 999px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+            border: 1px solid #e5e7eb;
+        }}
+        #country-panel .map-metric-switch .map-metric-label, .home-pie-wrap .map-metric-switch .map-metric-label {{
+            font-size: 13px;
+            font-weight: 600;
+            color: #6b7280;
+            white-space: nowrap;
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 2px solid transparent;
+            transition: border-color 0.2s, color 0.2s, box-shadow 0.2s;
+        }}
+        #country-panel .map-metric-switch .map-metric-label.active, .home-pie-wrap .map-metric-switch .map-metric-label.active {{
+            color: #1d4ed8;
+            border-color: #2563eb;
+            box-shadow: 0 0 0 1px rgba(37,99,235,0.3);
+        }}
+        #country-panel .map-metric-switch .switch-track, .home-pie-wrap .map-metric-switch .switch-track {{
+            flex-shrink: 0;
+            width: 48px;
+            height: 26px;
+            border-radius: 999px;
+            background: #d1d5db;
+            cursor: pointer;
+            position: relative;
+            transition: border-color 0.2s;
+            border: 1px solid #9ca3af;
+        }}
+        #country-panel .map-metric-switch .switch-track:hover, .home-pie-wrap .map-metric-switch .switch-track:hover {{
+            background: #b8bcc4;
+        }}
+        #country-panel .map-metric-switch .switch-track.on, .home-pie-wrap .map-metric-switch .switch-track.on {{
+            border-color: #9ca3af;
+        }}
+        #country-panel .map-metric-switch .switch-thumb, .home-pie-wrap .map-metric-switch .switch-thumb {{
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.25);
+            transition: transform 0.2s ease;
+            pointer-events: none;
+        }}
+        #country-panel .map-metric-switch .switch-track.on .switch-thumb, .home-pie-wrap .map-metric-switch .switch-track.on .switch-thumb {{
+            transform: translateX(0);
+        }}
+        #country-panel .map-metric-switch .switch-track:not(.on) .switch-thumb, .home-pie-wrap .map-metric-switch .switch-track:not(.on) .switch-thumb {{
+            transform: translateX(23px);
+        }}
+        #country-panel .map-error {{
+            position: absolute;
+            left: 12px;
+            right: 12px;
+            bottom: 12px;
+            padding: 12px;
+            background: rgba(17,24,39,0.9);
+            color: #f9fafb;
+            font-size: 13px;
+            border-radius: 8px;
+            display: none;
+            z-index: 11;
+        }}
+        #country-panel .map-error.visible {{
+            display: block;
+        }}
+        #country-panel .country-tooltip {{
+            position: absolute;
+            padding: 8px 12px;
+            border-radius: 6px;
+            background: rgba(17, 24, 39, 0.94);
+            color: #f9fafb;
+            font-size: 12px;
+            font-family: "Segoe UI", sans-serif;
+            line-height: 1.5;
+            white-space: nowrap;
+            pointer-events: none;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            z-index: 20;
+            display: none;
+        }}
+    </style>
+</head>
+<body{body_peer_attrs}>
+    {peer_review_watermark_html}
+    <div class="page">
+        <div class="dashboard-inner">
+        <nav class="nav">
+            <div class="nav-inner">
+                <a href="#" class="nav-home" id="nav-home" title="Home">
+                    <img src="{home_logo_path}" alt="Home" />
+                </a>
+                <div class="nav-links">
+                    <a href="#" id="nav-view-mdb">MDB Finance by SDG</a>
+                    <a href="#" id="nav-view-country">Explore by Country</a>
+                    <a href="#" id="nav-about">About this Work</a>
+                </div>
+            </div>
+        </nav>
+        <div class="main-row" id="main-row">
+            <div class="sidebar sidebar-mdb-v11">
+                <div class="buttons-wrapper">
+                    {buttons_html_str}
+                </div>
+            </div>
+            <div class="content-views">
+                <!-- 首页：左侧 MDB 选择栏同其他页，右侧欢迎文字 + 按年堆叠 bar chart -->
+                <div id="home-panel" class="view-panel active">
+                    <div class="home-right-wrapper">
+                        <div class="home-chart-row">
+                            <button type="button" class="home-arrow home-arrow-left" id="home-arrow-left" title="Back to bar chart" aria-label="Back to bar chart"><span class="home-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
+                            <div class="home-slider-wrapper">
+                                <div class="home-slider" id="home-slider">
+                                    <div class="home-slide-1">
+                                        <div class="home-welcome-block">
+                                            <p class="home-welcome-text">
+                                                <span class="home-welcome-first-row">
+                                                    <span class="home-welcome-first-line">Welcome to the MDB-SDG Dashboard.</span>
+                                                    {f'<img class="home-sdg-wheel-img" id="home-sdg-wheel" src="{sdg_wheel_path}" alt="SDG Wheel" title="SDG Wheel" />' if sdg_wheel_path else ''}
+                                                </span>
+                                                <br/><br/>
+                                                This dashboard collects all operations by nine major <strong class="home-term">Multilateral Development Banks (MDBs)</strong> from 2016 to 2025. Through natural language processing of project descriptions, <a class="home-link" href="https://github.com/ChristopherMa90/Bert-SDG-Multi-Label-Model" target="_blank" rel="noopener">a fine-tuned BERT model</a> classifies all operations into the <strong class="home-term">17 Sustainable Development Goals (SDGs)</strong>. The results capture general trends in MDBs' efforts to "finance a sustainable future" over this decade.<br/>
+                                                Starting from the chart below, <strong class="home-term">hover over the bars</strong> to see how many projects and the total amount approved by MDBs for a particular year and SDG. You can also <strong class="home-term">select an MDB from the left panel</strong> to filter and view MDB-specific results. Ready to dive deeper? Try <strong class="home-term">MDB Finance by SDG</strong> for goal-level insights, or <strong class="home-term">Explore by Country</strong> for geographic perspectives and country-level stats. Enjoy exploring!
+                                            </p>
+                                        </div>
+                                        <div class="home-chart-area">
+                                            <div class="home-chart-title-area" id="home-chart-title-area">
+                                                <h2 class="home-chart-title" id="home-chart-title">MDB Operations by Year: Project Count and Financing Amount (2016–2025)</h2>
+                                            </div>
+                                            <div class="home-stack-chart-wrap">
+                                                <canvas id="home-stack-canvas"></canvas>
+                                                <div id="home-chart-tooltip"></div>
+                                                <button type="button" class="chart-back-btn" id="home-chart-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="home-slide-2">
+                                        <div class="home-pie-title-area">
+                                            <h2 class="chart-title" id="home-pie-chart-title">MDB Operations by SDG: Project Share (2016–2025)</h2>
+                                        </div>
+                                        <div class="home-pie-wrap">
+                                            <canvas id="home-pie-canvas"></canvas>
+                                            <div id="home-pie-tooltip" class="home-pie-tooltip"></div>
+                                            <div class="home-pie-center-label">
+                                                <span class="home-pie-center-total" id="home-pie-center-total">—</span>
+                                                <span class="home-pie-center-hint" id="home-pie-center-hint">Total Project</span>
+                                                <span class="home-pie-center-hint" id="home-pie-center-hint-2" style="display:none;"></span>
+                                            </div>
+                                            <button type="button" class="chart-back-btn" id="home-pie-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                            <div class="map-metric-switch home-pie-metric-switch" id="home-pie-metric-switch" role="switch" aria-checked="true" aria-label="Project count or amount">
+                                                <span class="map-metric-label active" id="home-pie-metric-label-left">Project count</span>
+                                                <div class="switch-track on" id="home-pie-switch-track" title="点击切换：项目数量 / 金额（十亿美元）">
+                                                    <div class="switch-thumb"></div>
+                                                </div>
+                                                <span class="map-metric-label" id="home-pie-metric-label-right">Amount (B USD)</span>
+                                            </div>
+                                        </div>
+                                        <div class="year-slider-panel home-year-slider-panel">
+                                            <div class="year-slider-label year-range-label-reset" id="home-year-range-label" title="Click to reset to full range (2016–2025)">Year range (2016–2025)</div>
+                                            <div class="year-slider-track" id="home-year-slider-track">
+                                                <div class="year-slider-rail"></div>
+                                                <div class="year-slider-range" id="home-year-slider-range"></div>
+                                                <div class="year-slider-handle" id="home-handle-min"></div>
+                                                <div class="year-slider-handle" id="home-handle-max"></div>
+                                                <div class="year-slider-ticks" id="home-year-slider-ticks"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="home-slide-3">
+                                        <div class="home-pie-title-area">
+                                            <h2 class="chart-title" id="home-pointer-chart-title">MDB Operations by SDG: Triangle Profile (2016–2025)</h2>
+                                        </div>
+                                        <div class="home-pie-wrap">
+                                            <canvas id="home-pointer-canvas"></canvas>
+                                            <div class="home-pie-center-label">
+                                                <span class="home-pie-center-total" id="home-pointer-center-total">—</span>
+                                                <span class="home-pie-center-hint" id="home-pointer-center-hint">Total Project</span>
+                                                <span class="home-pie-center-hint" id="home-pointer-center-hint-2" style="display:none;"></span>
+                                            </div>
+                                            <button type="button" class="chart-back-btn" id="home-pointer-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                            <div class="map-metric-switch home-pie-metric-switch" id="home-pointer-metric-switch" role="switch" aria-checked="true" aria-label="Project count or amount">
+                                                <span class="map-metric-label active" id="home-pointer-metric-label-left">Project count</span>
+                                                <div class="switch-track on" id="home-pointer-switch-track" title="点击切换：项目数量 / 金额（十亿美元）">
+                                                    <div class="switch-thumb"></div>
+                                                </div>
+                                                <span class="map-metric-label" id="home-pointer-metric-label-right">Amount (B USD)</span>
+                                            </div>
+                                        </div>
+                                        <div class="year-slider-panel home-year-slider-panel">
+                                            <div class="year-slider-label year-range-label-reset" id="home-pointer-year-range-label" title="Click to reset to full range (2016–2025)">Year range (2016–2025)</div>
+                                            <div class="year-slider-track" id="home-pointer-year-slider-track">
+                                                <div class="year-slider-rail"></div>
+                                                <div class="year-slider-range" id="home-pointer-year-slider-range"></div>
+                                                <div class="year-slider-handle" id="home-pointer-handle-min"></div>
+                                                <div class="year-slider-handle" id="home-pointer-handle-max"></div>
+                                                <div class="year-slider-ticks" id="home-pointer-year-ticks"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="home-slide-4">
+                                        <div class="home-pie-title-area">
+                                            <h2 class="chart-title" id="home-chord-chart-title">SDG co-tagging flows (Most Relevant → other tags) (2016–2025)</h2>
+                                        </div>
+                                        <div class="home-pie-wrap">
+                                            <canvas id="home-chord-canvas"></canvas>
+                                            <div class="home-pie-center-label" id="home-chord-center-label">
+                                                <span class="home-pie-center-total" id="home-chord-flow-total">—</span>
+                                                <span class="home-pie-center-hint" id="home-chord-flow-hint">Directed link count (project rows × co-tags)</span>
+                                            </div>
+                                            <button type="button" class="chart-back-btn visible" id="home-chord-layout-btn" title="Switch chord layout mode">Mode: Fixed order</button>
+                                            <button type="button" class="chart-back-btn" id="home-chord-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                        </div>
+                                    </div>
+                                    <div class="home-slide-5">
+                                        <div class="home-pie-title-area">
+                                            <h2 class="chart-title" id="home-scatter-chart-title">MR-SDG profile by SDG: avg project share across MDBs vs avg project amount (2016–2025)</h2>
+                                        </div>
+                                        <div class="home-pie-wrap">
+                                            <canvas id="home-scatter-canvas"></canvas>
+                                            <div id="home-scatter-tooltip" class="home-pie-tooltip"></div>
+                                            <button type="button" class="chart-back-btn" id="home-scatter-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <button type="button" class="home-arrow home-arrow-right" id="home-arrow-right" title="View next chart" aria-label="View next chart"><span class="home-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></span></button>
+                        </div>
+                        <div class="home-legend-and-totals">
+                            <div class="home-totals-block-wrap" style="--home-totals-border-gradient: {sdg_conic_border};">
+                                <div class="home-totals-block" id="home-totals-block">
+                                    <div class="home-totals-projects">Total Projects Approved: <span id="home-totals-projects-n">—</span></div>
+                                    <div class="home-totals-amount">Total Amount Approved: <span id="home-totals-amount-n">—</span> <span id="home-totals-amount-unit">Billion USD</span></div>
+                                </div>
+                            </div>
+                            <div class="home-sdg-legend">
+                                <div class="home-sdg-legend-row">{home_sdg_legend_html_row1}</div>
+                                <div class="home-sdg-legend-row">{home_sdg_legend_html_row2}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- View by MDB：整体/单 MDB bar chart + 右箭头进入方形图表视图 -->
+                <div id="mdb-panel" class="view-panel">
+                    <div id="charts-panel" class="charts-panel">
+                        <div class="mdb-chart-row">
+                            <button type="button" class="mdb-arrow mdb-arrow-left" id="mdb-arrow-left" title="Back to bar chart" aria-label="Back to bar chart"><span class="mdb-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
+                            <div class="mdb-slider-wrapper">
+                                <div class="mdb-slider mdb-slide-pos-0" id="mdb-slider">
+                                    <div class="mdb-slide-1">
+                                        <div class="chart-wrapper" id="chart-wrapper">
+                                            <h2 class="chart-title">MDB Operations and Their Alignment with the Sustainable Development Goals (2016–2025)</h2>
+                                            <div class="chart-container">
+                                                <canvas id="sdg-canvas"></canvas>
+                                                <button type="button" class="chart-back-btn" id="chart-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                                <div class="sdg-logos-container" id="sdg-logos-container"></div>
+                                            </div>
+                                            <div class="year-slider-panel">
+                                                <div class="year-slider-label year-range-label-reset" id="mdb-year-range-label" title="Click to reset to full range (2016–2025)">Year range (2016–2025)</div>
+                                                <div class="year-slider-track" id="year-slider-track">
+                                                    <div class="year-slider-rail"></div>
+                                                    <div class="year-slider-range" id="year-slider-range"></div>
+                                                    <div class="year-slider-handle" id="year-handle-min"></div>
+                                                    <div class="year-slider-handle" id="year-handle-max"></div>
+                                                    <div class="year-slider-ticks" id="year-slider-ticks"></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="mdb-slide-2">
+                                        <div class="chart-wrapper mdb-square-chart-wrapper">
+                                            <h2 class="chart-title">MDB Operations' SDG Co-occurrence: Conditional Probability (2016–2025)</h2>
+                                            <div class="chart-container mdb-square-chart-container">
+                                                <div class="mdb-square-chart-inner">
+                                                    <div class="mdb-square-chart-spacer-left"></div>
+                                                    <div class="mdb-coocc-left-col">
+                                                        <div class="mdb-coocc-read-help-col">
+                                                            <div class="mdb-coocc-read-help" id="mdb-coocc-read-help">Cell (i, j) shows P(SDG j | SDG i): conditional probability that a project tagged with SDG i is also tagged with SDG j. Row index i runs along the vertical axis (left); column index j runs along the horizontal axis (bottom). Click on a row or column SDG logo to highlight and see details.</div>
+                                                        </div>
+                                                        <div class="mdb-coocc-detail-info" id="mdb-coocc-detail-info"></div>
+                                                    </div>
+                                                    <div class="mdb-coocc-row2-left">
+                                                        <div class="mdb-coocc-legend-block">
+                                                            <div class="mdb-coocc-legend-label" id="mdb-coocc-legend-label">P(SDG j | SDG i)</div>
+                                                            <div class="mdb-coocc-legend-bar" id="mdb-coocc-legend-bar"></div>
+                                                            <div class="mdb-coocc-legend-values">
+                                                                <span id="mdb-coocc-legend-min">0</span>
+                                                                <span id="mdb-coocc-legend-max">1</span>
+                                                            </div>
+                                                        </div>
+                                                        <div class="mdb-coocc-back-all-wrapper">
+                                                            <button type="button" class="chart-back-btn" id="mdb-coocc-back-all" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                                        </div>
+                                                    </div>
+                                                    <div class="mdb-axis-y-wrap">
+                                                        <div class="mdb-axis-y-list">{mdb_left_axis_html}</div>
+                                                    </div>
+                                                    <div class="mdb-square-plot-wrap">
+                                                        <div class="mdb-square-plot-area">
+                                                            <canvas id="mdb-cooccurrence-canvas"></canvas>
+                                                            <div class="mdb-cooccurrence-tooltip" id="mdb-cooccurrence-tooltip"></div>
+                                                            <div class="mdb-cooccurrence-fixed-tooltip" id="mdb-cooccurrence-fixed-tooltip"></div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="mdb-axis-spacer"><div class="mdb-axis-spacer-global" id="mdb-coocc-global-logo" title="Clear selection / All SDGs" role="button"><img src="{mdb_global_logo_path}" alt="SDG All" /></div></div>
+                                                    <div class="mdb-axis-x-wrap">
+                                                        <div class="mdb-axis-x-list">{mdb_bottom_axis_html}</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="mdb-slide-3">
+                                        <div class="chart-wrapper" id="mdb-amount-slide-wrapper">
+                                            <h2 class="chart-title" id="mdb-amount-hist-title">Project count by commitment size (USD)</h2>
+                                            <div class="chart-container mdb-amount-hist-container">
+                                                <canvas id="mdb-amount-hist-canvas"></canvas>
+                                                <button type="button" class="chart-back-btn" id="mdb-amount-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                            </div>
+                                            <p class="mdb-amount-hist-note">Same year range as the first slide (adjust handles there). One row per project in the source CSV; amounts are Total_Cost.</p>
+                                        </div>
+                                    </div>
+                                    <div class="mdb-slide-4">
+                                        <div class="home-pie-title-area">
+                                            <h2 class="chart-title" id="mdb-chord-chart-title">SDG co-tagging flows (Most Relevant → other tags) (2016–2025)</h2>
+                                        </div>
+                                        <div class="home-pie-wrap">
+                                            <canvas id="mdb-chord-canvas"></canvas>
+                                            <div class="home-pie-center-label" id="mdb-chord-center-label">
+                                                <span class="home-pie-center-total" id="mdb-chord-flow-total">—</span>
+                                                <span class="home-pie-center-hint" id="mdb-chord-flow-hint">Directed link count (project rows × co-tags)</span>
+                                            </div>
+                                            <button type="button" class="chart-back-btn visible" id="mdb-chord-layout-btn" title="Switch chord layout mode">Mode: Fixed order</button>
+                                            <button type="button" class="chart-back-btn" id="mdb-chord-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <button type="button" class="mdb-arrow mdb-arrow-right" id="mdb-arrow-right" title="View square chart" aria-label="View square chart"><span class="mdb-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></span></button>
+                        </div>
+                    </div>
+                </div>
+                <!-- View by Country：地图 + 滑块 -->
+                <div id="country-panel" class="view-panel">
+                    <div class="country-map-row">
+                        <div class="country-map-outer">
+                            <button type="button" class="country-arrow country-arrow-left" id="country-arrow-left-zero" title="View slider 0" aria-label="View slider 0"><span class="country-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
+                            <button type="button" class="country-arrow country-arrow-left" id="country-arrow-left" title="Back to map" aria-label="Back to map"><span class="country-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span></button>
+                            <div class="country-map-content">
+                                <div class="map-wrapper">
+                                    <div class="country-map-slider" id="country-map-slider">
+                                        <div class="country-slide-1">
+                                            <div class="country-map-title-row">
+                                                <h2 class="chart-title" id="country-map-chart-title">MDB Operations by Country (2016–2025)</h2>
+                                                <span class="country-map-title-hint">* Click on a country to view more</span>
+                                            </div>
+                                            <div class="map-container" id="country-map-container">
+                                                <div id="country-map" style="width:1400px;height:700px;position:relative;">
+                                                    <svg id="country-map-svg" width="1400" height="700" viewBox="0 0 1400 700"></svg>
+                                                    <div class="country-tooltip" id="country-tooltip"></div>
+                                                </div>
+                                                <div class="map-error" id="country-map-error"></div>
+                                                <div class="map-overlay-panel">
+                                                    <div class="map-metric-switch" id="map-metric-switch" role="switch" aria-checked="true" aria-label="Project count or amount">
+                                                        <span class="map-metric-label active" id="map-metric-label-left">Project count</span>
+                                                        <div class="switch-track on" id="map-switch-track" title="Switch: project count / amount (billion USD)">
+                                                            <div class="switch-thumb"></div>
+                                                        </div>
+                                                        <span class="map-metric-label" id="map-metric-label-right">Amount (B USD)</span>
+                                                    </div>
+                                                    <div class="map-legend-block">
+                                                        <div class="map-legend-label" id="country-legend-label">Projects</div>
+                                                        <div class="map-legend-bar" id="country-legend-bar"></div>
+                                                        <div class="map-legend-values">
+                                                            <span id="country-legend-min"></span>
+                                                            <span id="country-legend-max"></span>
+                                                        </div>
+                                                    </div>
+                                                    <div class="map-income-legend" id="country-income-legend" aria-label="Income group border colors">
+                                                        <div class="map-income-legend-title">Border: income group</div>
+                                                        <div class="map-income-legend-row"><span class="map-income-swatch" style="background:#d73027"></span><span>Low income countries (LIC)</span></div>
+                                                        <div class="map-income-legend-row"><span class="map-income-swatch" style="background:#fc8d59"></span><span>Lower-middle income countries (LMC)</span></div>
+                                                        <div class="map-income-legend-row"><span class="map-income-swatch" style="background:#4575b4"></span><span>Upper-middle income countries (UMC)</span></div>
+                                                        <div class="map-income-legend-row"><span class="map-income-swatch" style="background:#1a9850"></span><span>High income countries (HIC)</span></div>
+                                                        <div class="map-income-legend-row"><span class="map-income-swatch" style="background:#bdbdbd"></span><span>Unknown</span></div>
+                                                    </div>
+                                                    <button type="button" class="country-back-btn" id="country-back-btn" title="Back to all MDBs"><span class="country-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                                </div>
+                                            </div>
+                                            <div class="year-slider-panel">
+                                                <div class="year-slider-label year-range-label-reset" id="country-year-range-label" title="Click to reset to full range (2016–2025)">Year range (2016–2025)</div>
+                                                <div class="year-slider-track" id="country-year-slider-track">
+                                                    <div class="year-slider-rail"></div>
+                                                    <div class="year-slider-range" id="country-year-slider-range"></div>
+                                                    <div class="year-slider-handle" id="country-handle-min"></div>
+                                                    <div class="year-slider-handle" id="country-handle-max"></div>
+                                                    <div class="year-slider-ticks" id="country-year-slider-ticks"></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="country-slide-2">
+                                            <div class="country-radar-chart-title">
+                                                <h2 class="chart-title">MDB Operations (2016-2025)</h2>
+                                            </div>
+                                            <div class="chart-container country-radar-chart-container" id="country-radar-chart-container">
+                                                <div class="country-radar-wrap">
+                                                    <canvas id="country-radar-ring-canvas"></canvas>
+                                                    <div id="country-radar-tooltip"></div>
+                                                    <button type="button" class="chart-back-btn" id="country-radar-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                                    <div class="map-metric-switch" id="radar-metric-switch" role="switch" aria-checked="true" aria-label="Project count or amount">
+                                                        <span class="map-metric-label active" id="radar-metric-label-left">Project count</span>
+                                                        <div class="switch-track on" id="radar-switch-track" title="Switch: project count / amount (billion USD)">
+                                                            <div class="switch-thumb"></div>
+                                                        </div>
+                                                        <span class="map-metric-label" id="radar-metric-label-right">Amount (B USD)</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="country-slide-3">
+                                            <div class="country-barchart-title-row">
+                                                <h2 class="chart-title">MDB Operations (2016-2025)</h2>
+                                            </div>
+                                            <div class="barchart-container" id="country-barchart-container">
+                                                <canvas id="country-barchart-canvas"></canvas>
+                                                <div id="country-barchart-tooltip"></div>
+                                                <button type="button" class="chart-back-btn" id="country-barchart-back-btn" title="Back to all MDBs"><span class="chart-back-btn-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></span> Back to all MDBs</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="map-wrapper-sdg-logos">
+                                        {sdg_country_logos_html}
+                                    </div>
+                                </div>
+                            </div>
+                            <button type="button" class="country-arrow country-arrow-right" id="country-arrow-right" title="View detail" aria-label="View detail"><span class="country-arrow-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></span></button>
+                        </div>
+                    </div>
+                </div>
+                <!-- About this Work -->
+                <div id="about-panel" class="view-panel plain">
+                    <div class="about-block">
+                        <div class="about-acknowledgement">
+                            <h2>Acknowledgement</h2>
+                            <div class="about-acknowledgement-body">
+                                {acknowledgement_body_html}
+                            </div>
+                            {about_signature_html}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        </div>
+    </div>
+
+    <script>
+        window.SDG_TOTALS = {sdg_totals_js};
+        window.MDB_TOTALS = {mdb_totals_js};
+        window.MDB_NAMES = {mdb_names_js};
+        window.COUNTRY_TOTALS = {country_totals_js};
+        window.SDG_INDEX = {sdg_index_js};
+        window.ISO_NUMERIC_TO_ALPHA2 = {iso_numeric_to_alpha2_js};
+        window.COUNTRY_NAMES = {country_names_js};
+        window.ALPHA2_TO_ALPHA3 = {alpha2_to_alpha3_js};
+        window.ALPHA3_TO_ALPHA2 = {alpha3_to_alpha2_js};
+        window.COUNTRY_TOPOLOGY = {country_topology_js};
+        window.MOST_RELEVANT_SDG_DATA = {most_relevant_sdg_js};
+        window.SDG_ICON_PATHS = {sdg_icon_paths_js};
+        window.SDG_CROP_PATHS = {sdg_crop_paths_js};
+        window.HOME_POINTER_RING_PATH = {home_pointer_ring_path_js};
+        window.SDG_COLORS = {sdg_colors_js};
+        window.SDG_GOAL_NAMES = {sdg_goal_names_js};
+        window.SDG_COOCCURRENCE = {sdg_cooccurrence_js};
+        window.COUNTRY_NEED_PROJECT_SIMILARITY = {country_need_project_similarity_js};
+        window.COUNTRY_FY26_INCOME_GROUP = {country_fy26_income_js};
+        window.MDB_AMOUNT_HISTOGRAM = {mdb_amount_histogram_js};
+        window.MR_CHORD_FLOWS = {mr_chord_flows_js};
+        window.MR_AMOUNT_SAMPLES = {mr_amount_samples_js};
+        window.HOME_CHORD_RING_PATH = {home_chord_ring_path_js};
+
+        var DEFAULT_CHART_TITLE = "MDB Operations and Their Alignment with the Sustainable Development Goals (2016–2025)";
+        var currentView = "home";
+        var homeSelectedMdbIndex = 0;
+
+        function setActiveNav(id) {{
+            document.querySelectorAll(".nav-links a").forEach(function(a) {{
+                a.classList.toggle("active", a.id === id);
+            }});
+        }}
+
+        function clearAllSelections() {{
+            homeSelectedMdbIndex = 0;
+            homeSlideIndex = 0;
+            homeYearMinIdx = 0;
+            homeYearMaxIdx = 9;
+            homeAllSdgLegendSelected = false;
+            homeChordSelectedSdgIndex = 0;
+            var homeSdgEl = document.querySelector(".home-sdg-legend-item.home-sdg-legend-e-logo");
+            if (homeSdgEl) homeSdgEl.classList.remove("selected");
+            document.querySelectorAll("#home-panel .home-sdg-legend-item").forEach(function(el) {{ el.classList.remove("chord-selected"); }});
+            document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+            mdbSlideIndex = 0;
+            mdbCooccSelectedCol = null;
+            mdbCooccSelectedRow = null;
+            var slide2 = document.querySelector(".mdb-slide-2");
+            if (slide2) {{
+                slide2.querySelectorAll(".mdb-axis-y-item, .mdb-axis-x-item").forEach(function(el) {{
+                    el.classList.remove("selected", "highlight");
+                    el.style.boxShadow = "";
+                }});
+                var ft = document.getElementById("mdb-cooccurrence-fixed-tooltip");
+                if (ft) {{ ft.classList.remove("visible"); ft.innerHTML = ""; }}
+                var detailEl = document.getElementById("mdb-coocc-detail-info");
+                if (detailEl) detailEl.classList.remove("visible");
+            }}
+            countrySelectedMdbIndex = 0;
+            countrySelectedSdgIndex = 0;
+            selectedCountryCode = null;
+            pinnedTooltip = null;
+            countrySlideIndex = 1;
+            countryMinIdx = 0;
+            countryMaxIdx = (typeof countryYears !== "undefined" && countryYears.length) ? countryYears.length - 1 : 9;
+            window.countryRadarSelectedSector = null;
+            window.countryRadarHoveredSector = null;
+            document.querySelectorAll("#country-panel .map-sdg-logo-wrap").forEach(function(w) {{ w.classList.remove("selected"); }});
+            document.querySelectorAll("#country-panel path.country").forEach(function(p) {{ p.classList.remove("selected"); }});
+        }}
+
+        function showView(viewId) {{
+            clearAllSelections();
+            currentView = viewId;
+            document.querySelectorAll(".view-panel").forEach(function(p) {{
+                p.classList.toggle("active", p.id === viewId + "-panel");
+            }});
+            var mainRow = document.getElementById("main-row");
+            if (mainRow) {{
+                mainRow.classList.toggle("hide-sidebar", viewId === "about");
+            }}
+            if (viewId === "home") {{
+                setActiveNav("");
+                if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+                if (typeof updateHomeArrows === "function") updateHomeArrows();
+                requestAnimationFrame(function() {{
+                    if (typeof window._homeUpdateYearSliderUI === "function") window._homeUpdateYearSliderUI();
+                }});
+            }}
+            if (viewId === "mdb") {{
+                setActiveNav("nav-view-mdb");
+                updateMdbArrows();
+            }}
+            if (viewId === "country") {{
+                setActiveNav("nav-view-country");
+                if (typeof window.initCountryMap === "function") window.initCountryMap();
+                updateCountryArrows();
+                if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
+                requestAnimationFrame(function() {{
+                    if (typeof countryUpdateSliderUI === "function") countryUpdateSliderUI();
+                    if (typeof syncSidebarHeight === "function") syncSidebarHeight();
+                }});
+            }}
+            if (viewId === "about") setActiveNav("nav-about");
+        }}
+
+        function syncSidebarHeight() {{
+            /* 侧栏高度已用固定 866px 写定，不再动态设置 */
+        }}
+
+        window.initHomeChartOnce = function() {{
+            var data = window.MOST_RELEVANT_SDG_DATA;
+            if (!data || !data.by_mdb) return;
+            var mdbIndex = homeSelectedMdbIndex || 0;
+            var mdbData = data.by_mdb[mdbIndex] || data.by_mdb[0];
+            if (!mdbData) return;
+            var byYear = mdbData.by_year || {{}};
+            var totalProjects = 0, totalAmountUsd = 0;
+            var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            for (var yi = 0; yi < years.length; yi++) {{
+                var bucket = byYear[String(years[yi])];
+                if (!bucket) continue;
+                for (var s = 0; s < 17; s++) {{
+                    totalProjects += (bucket.count_by_sdg && bucket.count_by_sdg[s]) || 0;
+                    totalAmountUsd += (bucket.amount_by_sdg && bucket.amount_by_sdg[s]) || 0;
+                }}
+            }}
+            var totalAmountB = totalAmountUsd / 1e9;
+            var projEl = document.getElementById("home-totals-projects-n");
+            var amountEl = document.getElementById("home-totals-amount-n");
+            var amountUnitEl = document.getElementById("home-totals-amount-unit");
+            if (projEl) projEl.textContent = (totalProjects && totalProjects.toLocaleString) ? totalProjects.toLocaleString() : (totalProjects || "—");
+            if (amountEl) {{
+                if (totalAmountB >= 2000) {{
+                    amountEl.textContent = (totalAmountUsd / 1e12).toFixed(2);
+                    if (amountUnitEl) amountUnitEl.textContent = "Trillion USD";
+                }} else {{
+                    amountEl.textContent = (totalAmountB > 0 && totalAmountB.toFixed) ? totalAmountB.toFixed(1) : (totalAmountB || "—");
+                    if (amountUnitEl) amountUnitEl.textContent = "Billion USD";
+                }}
+            }}
+            var wrap = document.querySelector(".home-stack-chart-wrap");
+            var canvas = document.getElementById("home-stack-canvas");
+            var tooltipEl = document.getElementById("home-chart-tooltip");
+            var welcomeBlock = document.querySelector(".home-welcome-block");
+            var titleArea = document.getElementById("home-chart-title-area");
+            var titleEl = document.getElementById("home-chart-title");
+            var chartArea = document.querySelector(".home-chart-area");
+            var backBtn = document.getElementById("home-chart-back-btn");
+            if (!wrap || !canvas) return;
+            var wrapperEl = document.querySelector(".home-right-wrapper");
+            var legendEl = document.querySelector(".home-sdg-legend");
+            // Remove old event listeners by cloning the canvas node
+            if (window.homeCanvasMouseMoveHandler) {{
+                canvas.removeEventListener("mousemove", window.homeCanvasMouseMoveHandler);
+            }}
+            if (window.homeCanvasMouseLeaveHandler) {{
+                canvas.removeEventListener("mouseleave", window.homeCanvasMouseLeaveHandler);
+            }}
+            var isMdbSelected = homeSelectedMdbIndex > 0;
+            if (welcomeBlock) welcomeBlock.classList.toggle("hidden", isMdbSelected);
+            if (titleArea) titleArea.classList.remove("hidden");
+            if (chartArea) chartArea.classList.toggle("expanded", isMdbSelected);
+            if (backBtn) backBtn.classList.toggle("visible", isMdbSelected);
+            if (!isMdbSelected) {{
+                chartArea.style.height = "";
+                wrap.style.height = "";
+            }} else if (wrapperEl && legendEl) {{
+                var targetTop = window._homeDefaultLegendOffsetTop;
+                if (typeof targetTop === "number" && targetTop > 0) {{
+                    var expandedChartH = targetTop - 31;
+                    var expandedWrapH = expandedChartH - 40;
+                    chartArea.style.height = expandedChartH + "px";
+                    wrap.style.height = expandedWrapH + "px";
+                }} else {{
+                    chartArea.style.height = "";
+                    wrap.style.height = "";
+                }}
+            }}
+            var exportChartHeight = (typeof window.HOME_FIG_EXPORT_CHART_HEIGHT === "number" && window.HOME_FIG_EXPORT_CHART_HEIGHT > 0)
+                ? Math.round(window.HOME_FIG_EXPORT_CHART_HEIGHT)
+                : null;
+            var w = 1352;
+            var h;
+            if (isMdbSelected && wrapperEl && legendEl && typeof window._homeDefaultLegendOffsetTop === "number" && window._homeDefaultLegendOffsetTop > 0) {{
+                h = window._homeDefaultLegendOffsetTop - 71;
+            }} else {{
+                h = isMdbSelected ? 830 : 630;
+            }}
+            if (!isMdbSelected && exportChartHeight) {{
+                h = exportChartHeight;
+                if (wrap) wrap.style.height = exportChartHeight + "px";
+                if (chartArea) chartArea.style.height = (exportChartHeight + 40) + "px";
+            }}
+            canvas.width = w;
+            canvas.height = h;
+            var ctx = canvas.getContext("2d");
+            var colors = window.SDG_COLORS || [];
+            if (titleEl && window.MDB_NAMES) {{
+                if (isMdbSelected)
+                    titleEl.textContent = window.MDB_NAMES[homeSelectedMdbIndex - 1] + " Operations by Year: Project Count and Financing Amount (2016–2025)";
+                else
+                    titleEl.textContent = "MDB Operations by Year: Project Count and Financing Amount (2016–2025)";
+            }}
+            var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            var sidePadding = 36;
+            var timeAxisInset = 22;
+            var chartShiftRight = 18;
+            var yearRowLeft = sidePadding + timeAxisInset + chartShiftRight;
+            var yearRowRight = w - sidePadding - timeAxisInset + chartShiftRight;
+            var availableWidth = yearRowRight - yearRowLeft;
+            var yearRowHeight = 52;
+            var axisGap = 40;
+            var topChartTop = axisGap;
+            var topChartBottom = (h - yearRowHeight) / 2 - 10;
+            var yearRowTop = topChartBottom + 10;
+            var yearRowBottom = yearRowTop + yearRowHeight;
+            var bottomChartTop = yearRowBottom + 10;
+            var bottomChartBottom = h - axisGap;
+            if (topChartBottom <= topChartTop + 30) topChartBottom = topChartTop + 30;
+            if (bottomChartBottom <= bottomChartTop + 30) bottomChartBottom = bottomChartTop + 30;
+            var gap = 38;
+            var barWidth = (availableWidth - gap * (years.length - 1)) / years.length;
+            if (barWidth < 2) barWidth = 2;
+            var maxCount = 0, maxAmountB = 0;
+            for (var i = 0; i < years.length; i++) {{
+                var bucket = byYear[String(years[i])];
+                if (!bucket) continue;
+                var tc = 0, ta = 0;
+                for (var s = 0; s < 17; s++) {{ tc += (bucket.count_by_sdg && bucket.count_by_sdg[s]) || 0; ta += ((bucket.amount_by_sdg && bucket.amount_by_sdg[s]) || 0) / 1e9; }}
+                if (tc > maxCount) maxCount = tc;
+                if (ta > maxAmountB) maxAmountB = ta;
+            }}
+            if (!(maxCount > 0)) maxCount = 1;
+            if (!(maxAmountB > 0)) maxAmountB = 1;
+            function niceTicks(maxVal) {{
+                if (!(maxVal > 0)) return [0, 1];
+                var d = Math.floor(Math.log10(maxVal));
+                var scale = Math.pow(10, d);
+                var leading = Math.ceil(maxVal / scale);
+                var top = leading * scale;
+                var step = top / 4;
+                var ticks = [];
+                for (var i = 0; i <= 4; i++) ticks.push(step * i);
+                return ticks;
+            }}
+            var countTicks = niceTicks(maxCount);
+            var amountTicks = niceTicks(maxAmountB);
+            var scaleMaxCount = countTicks[4] || 1;
+            var scaleMaxAmount = amountTicks[4] || 1;
+            var topChartH = topChartBottom - topChartTop;
+            var bottomChartH = bottomChartBottom - bottomChartTop;
+            var segments = [];
+            var hoveredSegment = null;
+
+            function drawFrame() {{
+                ctx.fillStyle = "#ffffff";
+                ctx.fillRect(0, 0, w, h);
+                ctx.setLineDash([4, 4]);
+                ctx.strokeStyle = "rgba(0,0,0,0.26)";
+                ctx.lineWidth = 1;
+                countTicks.forEach(function(tick) {{
+                    var ratio = tick / scaleMaxCount;
+                    if (ratio <= 0.001 || ratio >= 0.999) return; // no boundary lines on plot edges
+                    var y = topChartBottom - ratio * topChartH;
+                    ctx.beginPath();
+                    ctx.moveTo(yearRowLeft, y);
+                    ctx.lineTo(yearRowRight, y);
+                    ctx.stroke();
+                }});
+                amountTicks.forEach(function(tick) {{
+                    var ratio = tick / scaleMaxAmount;
+                    if (ratio <= 0.001 || ratio >= 0.999) return; // no boundary lines on plot edges
+                    var y = bottomChartTop + ratio * bottomChartH;
+                    ctx.beginPath();
+                    ctx.moveTo(yearRowLeft, y);
+                    ctx.lineTo(yearRowRight, y);
+                    ctx.stroke();
+                }});
+                ctx.setLineDash([]);
+                ctx.fillStyle = "#000000";
+                ctx.font = "600 16px 'Segoe UI', sans-serif";
+                ctx.textAlign = "right";
+                ctx.textBaseline = "middle";
+                countTicks.forEach(function(tick) {{
+                    var ratio = tick / scaleMaxCount;
+                    var y = topChartBottom - ratio * topChartH;
+                    ctx.fillText(String(Math.round(tick)), yearRowLeft - 10, y);
+                }});
+                ctx.textAlign = "right";
+                amountTicks.forEach(function(tick) {{
+                    var ratio = tick / scaleMaxAmount;
+                    var y = bottomChartTop + ratio * bottomChartH;
+                    var roundedTick = Math.round(tick * 10) / 10;
+                    var tickLabel = (Math.abs(roundedTick - Math.round(roundedTick)) < 1e-9)
+                        ? String(Math.round(roundedTick))
+                        : roundedTick.toFixed(1);
+                    ctx.fillText(tickLabel, yearRowLeft - 10, y);
+                }});
+                ctx.font = "600 17px 'Segoe UI', sans-serif";
+                ctx.textAlign = "left";
+                ctx.textBaseline = "bottom";
+                ctx.fillText("Number of projects", 8, topChartTop - 16);
+                ctx.textAlign = "left";
+                ctx.textBaseline = "top";
+                ctx.fillText("Amount Approved (USD in billion)", 8, bottomChartBottom + 16);
+
+                var midGrad = ctx.createLinearGradient(yearRowLeft, 0, yearRowRight, 0);
+                midGrad.addColorStop(0, "#EEF3F9");
+                midGrad.addColorStop(0.5, "#F3F7FC");
+                midGrad.addColorStop(1, "#E6EEF8");
+                ctx.fillStyle = midGrad;
+                ctx.beginPath();
+                ctx.rect(yearRowLeft, yearRowTop, availableWidth, yearRowHeight);
+                ctx.fill();
+                // Keep the time strip clean: no visible hard border.
+                ctx.fillStyle = "#000000";
+                ctx.font = "600 18px 'Segoe UI', sans-serif";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+
+                segments.length = 0;
+                for (var i = 0; i < years.length; i++) {{
+                    var bucket = byYear[String(years[i])] || {{ count_by_sdg: [], amount_by_sdg: [] }};
+                    var leftX = yearRowLeft + i * (barWidth + gap);
+                    var cx = leftX + barWidth / 2;
+                    var cStackY = topChartBottom;
+                    for (var s = 0; s < 17; s++) {{
+                        var v = (bucket.count_by_sdg && bucket.count_by_sdg[s]) || 0;
+                        // Scale bars to the same max as Y-axis ticks (niceTicks), not raw maxCount — otherwise
+                        // the peak year fills the plot and visually aligns with a padded tick (e.g. 4000 vs 3097).
+                        var segH = (v / scaleMaxCount) * topChartH;
+                        if (segH < 0.5 && v > 0) segH = 0.5;
+                        cStackY -= segH;
+                        var seg = {{ type: "count", yearIndex: i, year: years[i], sdgIndex: s, x: leftX, y: cStackY, w: barWidth, h: segH, value: v, label: "SDG " + (s + 1) }};
+                        segments.push(seg);
+                        var isHover = hoveredSegment && hoveredSegment === seg;
+                        ctx.fillStyle = colors[s] || "#94a3b8";
+                        ctx.fillRect(leftX, cStackY, barWidth, segH);
+                        if (isHover) {{ ctx.strokeStyle = "#111827"; ctx.lineWidth = 2; ctx.strokeRect(leftX, cStackY, barWidth, segH); ctx.lineWidth = 1; }}
+                    }}
+                    var aStackY = bottomChartTop;
+                    for (var s = 0; s < 17; s++) {{
+                        var v = ((bucket.amount_by_sdg && bucket.amount_by_sdg[s]) || 0) / 1e9;
+                        var segH = (v / scaleMaxAmount) * bottomChartH;
+                        if (segH < 0.5 && v > 0) segH = 0.5;
+                        var seg = {{ type: "amount", yearIndex: i, year: years[i], sdgIndex: s, x: leftX, y: aStackY, w: barWidth, h: segH, value: v, label: "SDG " + (s + 1) }};
+                        segments.push(seg);
+                        var isHover = hoveredSegment && hoveredSegment === seg;
+                        ctx.fillStyle = (colors[s] || "#94a3b8") + "cc";
+                        ctx.fillRect(leftX, aStackY, barWidth, segH);
+                        if (isHover) {{ ctx.strokeStyle = "#111827"; ctx.lineWidth = 2; ctx.strokeRect(leftX, aStackY, barWidth, segH); ctx.lineWidth = 1; }}
+                        aStackY += segH;
+                    }}
+                    ctx.fillStyle = "#334155";
+                    ctx.font = "700 16px 'Segoe UI', sans-serif";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText(String(years[i]), cx, yearRowTop + yearRowHeight / 2);
+                    if (homeAllSdgLegendSelected) {{
+                        var tc = 0, ta = 0;
+                        for (var s = 0; s < 17; s++) {{ tc += (bucket.count_by_sdg && bucket.count_by_sdg[s]) || 0; ta += ((bucket.amount_by_sdg && bucket.amount_by_sdg[s]) || 0) / 1e9; }}
+                        ctx.fillStyle = "#111827";
+                        ctx.font = "600 13px 'Segoe UI', sans-serif";
+                        ctx.textBaseline = "bottom";
+                        ctx.fillText((tc && tc.toLocaleString) ? tc.toLocaleString() : String(tc), cx, cStackY - 4);
+                        ctx.textBaseline = "top";
+                        ctx.fillText((ta > 0 && ta.toFixed) ? ta.toFixed(1) : (ta || "0"), cx, aStackY + 4);
+                    }}
+                }}
+            }}
+
+            drawFrame();
+
+            if (!isMdbSelected && wrapperEl && legendEl) {{
+                requestAnimationFrame(function() {{
+                    requestAnimationFrame(function() {{
+                        var wt = wrapperEl.getBoundingClientRect().top;
+                        var pt = getComputedStyle(wrapperEl).paddingTop;
+                        var pad = parseInt(pt, 10) || 0;
+                        var lt = legendEl.getBoundingClientRect().top;
+                        window._homeDefaultLegendOffsetTop = lt - wt - pad;
+                    }});
+                }});
+            }}
+
+            if (tooltipEl) {{
+                window.homeCanvasMouseMoveHandler = function(ev) {{
+                    var rect = canvas.getBoundingClientRect();
+                    var x = ev.clientX - rect.left;
+                    var y = ev.clientY - rect.top;
+                    var hit = null;
+                    for (var k = 0; k < segments.length; k++) {{
+                        var b = segments[k];
+                        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h && b.h > 1) {{ hit = b; break; }}
+                    }}
+                    if (hoveredSegment !== hit) {{ hoveredSegment = hit; drawFrame(); }}
+                    if (!hit) {{ tooltipEl.style.display = "none"; return; }}
+                    var wrapRect = wrap.getBoundingClientRect();
+                    tooltipEl.style.display = "block";
+                    tooltipEl.style.left = (ev.clientX - wrapRect.left + 14) + "px";
+                    tooltipEl.style.top = (ev.clientY - wrapRect.top + 10) + "px";
+                    tooltipEl.innerHTML = "<strong>" + hit.year + " · " + hit.label + "</strong><br/>" + (hit.type === "count" ? "Projects: " + Math.round(hit.value) : "Amount: " + hit.value.toFixed(2) + " B USD");
+                }};
+                window.homeCanvasMouseLeaveHandler = function() {{ hoveredSegment = null; if (tooltipEl) tooltipEl.style.display = "none"; drawFrame(); }};
+                canvas.addEventListener("mousemove", window.homeCanvasMouseMoveHandler);
+                canvas.addEventListener("mouseleave", window.homeCanvasMouseLeaveHandler);
+            }}
+        }};
+
+        function getHomePieDataForYearRange() {{
+            var data = window.MOST_RELEVANT_SDG_DATA;
+            if (!data || !data.by_mdb || !data.by_mdb[0]) return {{ counts: [], amounts: [], totalProjects: 0, totalAmountUsd: 0 }};
+            var mdbIndex = (typeof homeSelectedMdbIndex !== "undefined" ? homeSelectedMdbIndex : 0) || 0;
+            var mdbData = data.by_mdb[mdbIndex] || data.by_mdb[0];
+            var byYear = mdbData.by_year || {{}};
+            var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            var counts = new Array(17).fill(0);
+            var amounts = new Array(17).fill(0);
+            var totalAmountUsd = 0;
+            for (var i = homeYearMinIdx; i <= homeYearMaxIdx; i++) {{
+                var bucket = byYear[String(years[i])];
+                if (!bucket) continue;
+                for (var s = 0; s < 17; s++) {{
+                    var c = (bucket.count_by_sdg && bucket.count_by_sdg[s]) || 0;
+                    var a = (bucket.amount_by_sdg && bucket.amount_by_sdg[s]) || 0;
+                    counts[s] += c;
+                    amounts[s] += a;
+                    totalAmountUsd += a;
+                }}
+            }}
+            var totalProjects = counts.reduce(function(a, b) {{ return a + b; }}, 0);
+            return {{ counts: counts, amounts: amounts, totalProjects: totalProjects, totalAmountUsd: totalAmountUsd }};
+        }}
+
+        function getHomeScatterDataForYearRange() {{
+            var data = window.MOST_RELEVANT_SDG_DATA;
+            var amtRaw = window.MR_AMOUNT_SAMPLES;
+            if (!data || !data.by_mdb || data.by_mdb.length < 2 || !amtRaw || !amtRaw.by_mdb) return null;
+            var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            var n = 17;
+            var sumShare = new Array(n).fill(0);
+            var shareDen = new Array(n).fill(0);
+            var sumAmt = new Array(n).fill(0);
+            var sumCnt = new Array(n).fill(0);
+            var samplesBySdg = [];
+            for (var si = 0; si < n; si++) samplesBySdg.push([]);
+            var mdbUsed = 0;
+            var selectedMdb = (typeof homeSelectedMdbIndex !== "undefined" ? homeSelectedMdbIndex : 0) || 0;
+            var miStart = (selectedMdb > 0) ? selectedMdb : 1;
+            var miEnd = (selectedMdb > 0) ? selectedMdb : (data.by_mdb.length - 1);
+            for (var mi = miStart; mi <= miEnd; mi++) {{
+                var mdbData = data.by_mdb[mi];
+                if (!mdbData || !mdbData.by_year) continue;
+                var amtData = amtRaw.by_mdb[mi];
+                var counts = new Array(n).fill(0);
+                var totalMdbProjects = 0;
+                for (var yi = homeYearMinIdx; yi <= homeYearMaxIdx; yi++) {{
+                    var bucket = mdbData.by_year[String(years[yi])];
+                    var yk = String(years[yi]);
+                    if (!bucket) continue;
+                    for (var s = 0; s < n; s++) {{
+                        var c = (bucket.count_by_sdg && bucket.count_by_sdg[s]) || 0;
+                        var a = (bucket.amount_by_sdg && bucket.amount_by_sdg[s]) || 0;
+                        counts[s] += c;
+                        sumAmt[s] += a;
+                        sumCnt[s] += c;
+                        totalMdbProjects += c;
+                        if (amtData && amtData.by_year && amtData.by_year[yk] && amtData.by_year[yk][s] && amtData.by_year[yk][s].length) {{
+                            var arr = amtData.by_year[yk][s];
+                            for (var ai = 0; ai < arr.length; ai++) samplesBySdg[s].push(Number(arr[ai]) || 0);
+                        }}
+                    }}
+                }}
+                if (totalMdbProjects <= 0) continue;
+                mdbUsed += 1;
+                for (var sj = 0; sj < n; sj++) {{
+                    var share = counts[sj] / totalMdbProjects;
+                    sumShare[sj] += share;
+                    shareDen[sj] += 1;
+                }}
+            }}
+            function quantile(sortedVals, q) {{
+                var m = sortedVals.length;
+                if (!m) return 0;
+                if (m === 1) return sortedVals[0];
+                var pos = (m - 1) * q;
+                var lo = Math.floor(pos);
+                var hi = Math.ceil(pos);
+                if (lo === hi) return sortedVals[lo];
+                var t = pos - lo;
+                return sortedVals[lo] * (1 - t) + sortedVals[hi] * t;
+            }}
+            var points = [];
+            for (var k = 0; k < n; k++) {{
+                var xAvgShare = shareDen[k] > 0 ? (sumShare[k] / shareDen[k]) : 0;
+                var vals = samplesBySdg[k].filter(function(v) {{ return v > 0 && isFinite(v); }}).sort(function(a, b) {{ return a - b; }});
+                var yAvgAmt = sumCnt[k] > 0 ? (sumAmt[k] / sumCnt[k]) : 0;
+                var q1 = quantile(vals, 0.25);
+                var q2 = quantile(vals, 0.5);
+                var q3 = quantile(vals, 0.75);
+                var iqr = Math.max(0, q3 - q1);
+                var lowFence = q1 - 1.5 * iqr;
+                var highFence = q3 + 1.5 * iqr;
+                var wLo = vals.length ? vals[0] : 0;
+                var wHi = vals.length ? vals[vals.length - 1] : 0;
+                for (var vi = 0; vi < vals.length; vi++) {{
+                    if (vals[vi] >= lowFence) {{ wLo = vals[vi]; break; }}
+                }}
+                for (var vj = vals.length - 1; vj >= 0; vj--) {{
+                    if (vals[vj] <= highFence) {{ wHi = vals[vj]; break; }}
+                }}
+                if (!vals.length && yAvgAmt > 0) {{
+                    q1 = yAvgAmt;
+                    q2 = yAvgAmt;
+                    q3 = yAvgAmt;
+                    wLo = yAvgAmt;
+                    wHi = yAvgAmt;
+                }}
+                points.push({{
+                    sdg: k + 1,
+                    xAvgShare: xAvgShare,
+                    yAvgAmtUsd: yAvgAmt,
+                    count: vals.length || (yAvgAmt > 0 ? 1 : 0),
+                    q1: q1, q2: q2, q3: q3, wLo: wLo, wHi: wHi,
+                    vals: vals.length ? vals : (yAvgAmt > 0 ? [yAvgAmt] : [])
+                }});
+            }}
+            return {{ points: points, mdbUsed: mdbUsed, selectedMdb: selectedMdb }};
+        }}
+
+        function hexToLuminance(hex) {{
+            if (!hex || hex.length < 4) return 0.5;
+            var h = hex.replace(/^#/, "");
+            if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+            var r = parseInt(h.substr(0,2), 16) / 255;
+            var g = parseInt(h.substr(2,2), 16) / 255;
+            var b = parseInt(h.substr(4,2), 16) / 255;
+            return 0.299 * r + 0.587 * g + 0.114 * b;
+        }}
+
+        function drawHomePieChart() {{
+            var canvas = document.getElementById("home-pie-canvas");
+            var centerTotal = document.getElementById("home-pie-center-total");
+            if (!canvas) return;
+            var wrap = canvas.closest(".home-pie-wrap");
+            if (!wrap) return;
+            var rect = wrap.getBoundingClientRect();
+            var canvasWidth = Math.floor(rect.width) || 480;
+            var canvasHeight = Math.floor(rect.height) || 480;
+            var size = Math.min(canvasWidth, canvasHeight);
+            var dpr = window.devicePixelRatio || 1;
+            canvas.width = canvasWidth * dpr;
+            canvas.height = canvasHeight * dpr;
+            canvas.style.width = canvasWidth + "px";
+            canvas.style.height = canvasHeight + "px";
+            var ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.scale(dpr, dpr);
+            var pieData = getHomePieDataForYearRange();
+            var counts = pieData.counts;
+            var amounts = pieData.amounts || [];
+            var isPieAmountMode = (window.homePieMetricMode || "count") === "amount";
+            var total = isPieAmountMode ? pieData.totalAmountUsd : pieData.totalProjects;
+            var colors = window.SDG_COLORS || [];
+            var cx = canvasWidth / 2;
+            var cy = canvasHeight / 2;
+            var rOuter = size * 0.42;
+            var rInner = size * 0.21;
+            var n = 17;
+            var startAngle0 = -Math.PI / 2;
+            var margin = 28;
+            var leaderLen = 20;
+            var smallSegments = [];
+            window._homePieMetricMode = isPieAmountMode ? "amount" : "count";
+            var pieBackBtn = document.getElementById("home-pie-back-btn");
+            if (pieBackBtn) pieBackBtn.classList.toggle("visible", (typeof homeSelectedMdbIndex !== "undefined" && homeSelectedMdbIndex > 0));
+            var pieTitleEl = document.getElementById("home-pie-chart-title");
+            if (pieTitleEl) {{
+                var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+                var yMin = years[homeYearMinIdx];
+                var yMax = years[homeYearMaxIdx];
+                var titleBase = "MDB Operations by SDG: " + (isPieAmountMode ? "Amount Share" : "Project Share") + " (" + (homeYearMinIdx === homeYearMaxIdx ? yMin : yMin + "–" + yMax) + ")";
+                if (typeof homeSelectedMdbIndex !== "undefined" && homeSelectedMdbIndex > 0 && window.MDB_NAMES && window.MDB_NAMES[homeSelectedMdbIndex - 1])
+                    pieTitleEl.textContent = window.MDB_NAMES[homeSelectedMdbIndex - 1] + " " + titleBase;
+                else
+                    pieTitleEl.textContent = titleBase;
+            }}
+            ctx.clearRect(0, 0, size, size);
+            var sectors = [];
+            if (total <= 0) {{
+                if (centerTotal) centerTotal.textContent = "—";
+                var centerHint = document.getElementById("home-pie-center-hint");
+                var centerHint2 = document.getElementById("home-pie-center-hint-2");
+                if (centerHint) {{
+                    centerHint.textContent = isPieAmountMode ? "Billion USD" : "Total Project";
+                    centerHint.classList.toggle("bold", isPieAmountMode);
+                }}
+                if (centerHint2) {{ centerHint2.textContent = "Total Amount"; centerHint2.style.display = isPieAmountMode ? "block" : "none"; }}
+                window._homePieSectors = [];
+                window._homePieHit = {{ size: size, width: canvasWidth, height: canvasHeight, cx: cx, cy: cy, rInner: rInner, rOuter: rOuter }};
+                return;
+            }}
+            var currentAngle = startAngle0;
+            for (var i = 0; i < n; i++) {{
+                var frac = isPieAmountMode ? (amounts[i] || 0) / total : (counts[i] / total);
+                var sweep = frac * 2 * Math.PI;
+                var segEnd = currentAngle + sweep;
+                if (sweep > 0) {{
+                    ctx.beginPath();
+                    ctx.moveTo(cx + rOuter * Math.cos(currentAngle), cy + rOuter * Math.sin(currentAngle));
+                    ctx.arc(cx, cy, rOuter, currentAngle, segEnd);
+                    ctx.arc(cx, cy, rInner, segEnd, currentAngle, true);
+                    ctx.closePath();
+                    var segColor = colors[i] || "#94a3b8";
+                    ctx.fillStyle = segColor;
+                    ctx.fill();
+                    if (homeAllSdgLegendSelected && frac >= 0.001) {{
+                        var midAngle = (currentAngle + segEnd) / 2;
+                        var midR = (rOuter + rInner) / 2;
+                        var lum = hexToLuminance(segColor);
+                        var textColor = lum < 0.45 ? "#ffffff" : "#1f2937";
+                        if (frac >= 0.03) {{
+                            ctx.font = "700 20px 'Segoe UI', sans-serif";
+                            ctx.textAlign = "center";
+                            ctx.textBaseline = "middle";
+                            var txt = (frac * 100).toFixed(1) + "%";
+                            var tx = cx + midR * Math.cos(midAngle);
+                            var ty = cy + midR * Math.sin(midAngle);
+                            ctx.strokeStyle = lum < 0.45 ? "rgba(0,0,0,0.35)" : "rgba(255,255,255,0.8)";
+                            ctx.lineWidth = 2.5;
+                            ctx.strokeText(txt, tx, ty);
+                            ctx.fillStyle = textColor;
+                            ctx.fillText(txt, tx, ty);
+                        }} else {{
+                            var rightSide = Math.cos(midAngle) >= 0;
+                            var edgeAngle = rightSide ? segEnd : currentAngle;
+                            var p0x = cx + rOuter * Math.cos(edgeAngle);
+                            var p0y = cy + rOuter * Math.sin(edgeAngle);
+                            var p1x = cx + (rOuter + leaderLen) * Math.cos(edgeAngle);
+                            var p1y = cy + (rOuter + leaderLen) * Math.sin(edgeAngle);
+                            smallSegments.push({{ midAngle: midAngle, frac: frac, p0x: p0x, p0y: p0y, p1x: p1x, p1y: p1y, rightSide: rightSide, color: segColor }});
+                        }}
+                    }}
+                    sectors.push({{ startAngle: currentAngle, endAngle: segEnd, sdgIndex: i, count: counts[i], amountUsd: amounts[i] || 0, frac: frac }});
+                }}
+                currentAngle = segEnd;
+            }}
+            if (homeAllSdgLegendSelected && smallSegments.length > 0) {{
+                smallSegments.sort(function(a, b) {{ return a.p1y - b.p1y; }});
+                var lineGap = 16;
+                var lastLeftY = -1e9;
+                var lastRightY = -1e9;
+                var extendLen = 58;
+                var rightP2x = Math.min(canvasWidth - margin - 50, cx + rOuter + extendLen);
+                var leftP2x = Math.max(margin + 50, cx - rOuter - extendLen);
+                for (var si = 0; si < smallSegments.length; si++) {{
+                    var seg = smallSegments[si];
+                    var p2x = seg.rightSide ? rightP2x : leftP2x;
+                    var p1y = seg.p1y;
+                    if (seg.rightSide) {{
+                        if (p1y < lastRightY + lineGap) p1y = lastRightY + lineGap;
+                        lastRightY = p1y;
+                    }} else {{
+                        if (p1y < lastLeftY + lineGap) p1y = lastLeftY + lineGap;
+                        lastLeftY = p1y;
+                    }}
+                    p1y = Math.max(margin, Math.min(canvasHeight - margin, p1y));
+                    if (seg.rightSide) lastRightY = p1y; else lastLeftY = p1y;
+                    ctx.strokeStyle = seg.color;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(seg.p0x, seg.p0y);
+                    ctx.lineTo(seg.p1x, seg.p1y);
+                    if (Math.abs(p1y - seg.p1y) > 0.5) ctx.lineTo(seg.p1x, p1y);
+                    ctx.lineTo(p2x, p1y);
+                    ctx.stroke();
+                    var labelGap = 10;
+                    var labelX = seg.rightSide ? p2x + labelGap : p2x - labelGap;
+                    ctx.textAlign = seg.rightSide ? "left" : "right";
+                    ctx.textBaseline = "middle";
+                    ctx.font = "700 20px 'Segoe UI', sans-serif";
+                    var txt = (seg.frac * 100).toFixed(1) + "%";
+                    ctx.fillStyle = "#1f2937";
+                    ctx.fillText(txt, labelX, p1y);
+                }}
+            }}
+            if (centerTotal) {{
+                if (isPieAmountMode)
+                    centerTotal.textContent = (total / 1e9).toFixed(2);
+                else
+                    centerTotal.textContent = (total && total.toLocaleString) ? total.toLocaleString() : total;
+            }}
+            var centerHint = document.getElementById("home-pie-center-hint");
+            var centerHint2 = document.getElementById("home-pie-center-hint-2");
+            if (centerHint) {{
+                centerHint.textContent = isPieAmountMode ? "Billion USD" : "Total Project";
+                centerHint.classList.toggle("bold", isPieAmountMode);
+            }}
+            if (centerHint2) {{ centerHint2.textContent = "Total Amount"; centerHint2.style.display = isPieAmountMode ? "block" : "none"; }}
+            window._homePieSectors = sectors;
+            window._homePieHit = {{ size: size, width: canvasWidth, height: canvasHeight, cx: cx, cy: cy, rInner: rInner, rOuter: rOuter }};
+        }}
+
+        function drawHomePointerChart() {{
+            var canvas = document.getElementById("home-pointer-canvas");
+            if (!canvas) return;
+            var wrap = canvas.closest(".home-pie-wrap");
+            if (!wrap) return;
+            var rect = wrap.getBoundingClientRect();
+            var canvasWidth = Math.floor(rect.width) || 480;
+            var canvasHeight = Math.floor(rect.height) || 480;
+            var size = Math.min(canvasWidth, canvasHeight);
+            var dpr = window.devicePixelRatio || 1;
+            canvas.width = canvasWidth * dpr;
+            canvas.height = canvasHeight * dpr;
+            canvas.style.width = canvasWidth + "px";
+            canvas.style.height = canvasHeight + "px";
+            var ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.scale(dpr, dpr);
+            ctx.imageSmoothingEnabled = true;
+            if (typeof ctx.imageSmoothingQuality === "string") ctx.imageSmoothingQuality = "high";
+
+            var pieData = getHomePieDataForYearRange();
+            var counts = pieData.counts || [];
+            var amounts = pieData.amounts || [];
+            var isAmountMode = (window.homePieMetricMode || "count") === "amount";
+            var values = [];
+            var maxVal = 0;
+            for (var i = 0; i < 17; i++) {{
+                var v = isAmountMode ? ((amounts[i] || 0) / 1e9) : (counts[i] || 0);
+                values.push(v);
+                if (v > maxVal) maxVal = v;
+            }}
+            if (!(maxVal > 0)) maxVal = 1;
+
+            function niceTicks(maxValue) {{
+                if (!(maxValue > 0)) return [0, 1, 2, 3, 4];
+                var d = Math.floor(Math.log10(maxValue));
+                var scale = Math.pow(10, d);
+                var leading = Math.ceil(maxValue / scale);
+                var top = leading * scale;
+                var step = top / 4;
+                var ticks = [];
+                for (var ti = 0; ti <= 4; ti++) ticks.push(step * ti);
+                return ticks;
+            }}
+            function shadeHex(hex, percent) {{
+                if (!hex || hex.charAt(0) !== "#" || (hex.length !== 7 && hex.length !== 4)) return hex || "#64748b";
+                var h = hex;
+                if (h.length === 4) h = "#" + h[1] + h[1] + h[2] + h[2] + h[3] + h[3];
+                var r = parseInt(h.substr(1,2), 16);
+                var g = parseInt(h.substr(3,2), 16);
+                var b = parseInt(h.substr(5,2), 16);
+                var t = percent < 0 ? 0 : 255;
+                var p = Math.abs(percent);
+                var rn = Math.round((t - r) * p) + r;
+                var gn = Math.round((t - g) * p) + g;
+                var bn = Math.round((t - b) * p) + b;
+                return "#" + ((1 << 24) + (rn << 16) + (gn << 8) + bn).toString(16).slice(1);
+            }}
+
+            function pickPointerLayoutConfig() {{
+                var cfg = null;
+                var mdbIdx = (typeof homeSelectedMdbIndex === "number") ? homeSelectedMdbIndex : 0;
+                var byMdb = window.HOME_POINTER_LAYOUT_BY_MDB;
+                if (byMdb && typeof byMdb === "object") {{
+                    if (byMdb[mdbIdx] && typeof byMdb[mdbIdx] === "object") cfg = byMdb[mdbIdx];
+                    else if (byMdb["default"] && typeof byMdb["default"] === "object") cfg = byMdb["default"];
+                }}
+                if (!cfg && window.HOME_POINTER_LAYOUT && typeof window.HOME_POINTER_LAYOUT === "object") cfg = window.HOME_POINTER_LAYOUT;
+                return cfg || {{}};
+            }}
+            function pickNumber(primary, fallback, minVal, maxVal) {{
+                var v = (typeof primary === "number" && isFinite(primary)) ? primary : fallback;
+                if (!(typeof v === "number" && isFinite(v))) return fallback;
+                if (typeof minVal === "number" && v < minVal) v = minVal;
+                if (typeof maxVal === "number" && v > maxVal) v = maxVal;
+                return v;
+            }}
+
+            var cx = canvasWidth / 2;
+            var cy = canvasHeight / 2;
+            var layoutCfg = pickPointerLayoutConfig();
+            // 允许手动调“三角形底半径”和“尖端最大半径”，便于做“矮胖”风格微调
+            var rOuterScale = pickNumber(layoutCfg.outerRadiusScale, 0.42, 0.18, 0.49);
+            var rBaseScale = pickNumber(layoutCfg.baseRadiusScale, 0.12, 0.02, 0.40);
+            if (rBaseScale >= rOuterScale - 0.01) rBaseScale = Math.max(0.02, rOuterScale - 0.01);
+            var rOuter = size * rOuterScale;
+            var rBase = size * rBaseScale;
+            var n = 17;
+            var anglePer = (2 * Math.PI) / n;
+            // 底边目标间距 1-2px，按半径换算成角度
+            var gapPx = 1.5;
+            var gapAngle = Math.max(0.0015, gapPx / Math.max(2 * rBase, 1));
+            var rotationOffset = Math.PI / 17; // 逆时针旋转 π/17，与外圈 SDG1 顶部对齐
+            var colors = window.SDG_COLORS || [];
+            var ticks = niceTicks(maxVal);
+            var scaleMax = ticks[4] || maxVal;
+            // 尖端最大半径：优先使用显式 tipRadiusScale；否则走 autoTipTickIndex(默认3=第4刻度)
+            var explicitTipScale = (typeof layoutCfg.tipRadiusScale === "number" && isFinite(layoutCfg.tipRadiusScale)) ? layoutCfg.tipRadiusScale : null;
+            var autoTipTickIndex = Math.round(pickNumber(layoutCfg.autoTipTickIndex, 3, 1, 4));
+            var rUsableOuter = null;
+            if (explicitTipScale != null) {{
+                rUsableOuter = size * explicitTipScale;
+            }} else {{
+                rUsableOuter = rBase + (rOuter - rBase) * ((ticks[autoTipTickIndex] || ticks[3] || 0) / Math.max(scaleMax, 1));
+            }}
+            rUsableOuter = Math.max(rBase + 2, Math.min(rOuter - 1, rUsableOuter));
+
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+            var ringImg = window._homePointerRingImg;
+            if (!ringImg) {{
+                ringImg = new Image();
+                ringImg.src = window.HOME_POINTER_RING_PATH || "";
+                ringImg.onload = function() {{
+                    if (typeof drawHomePointerChart === "function") drawHomePointerChart();
+                }};
+                window._homePointerRingImg = ringImg;
+            }}
+            if (ringImg && ringImg.complete && ringImg.naturalWidth) {{
+                /* 页面上的环直径由 size * ringLayoutScale 决定；PNG 的 OUTER_RADIUS 只影响导出分辨率，不会单独缩小 HTML 中的环 */
+                var ringLayoutScale = null;
+                if (typeof layoutCfg.ringLayoutScale === "number" && isFinite(layoutCfg.ringLayoutScale) && layoutCfg.ringLayoutScale > 0) ringLayoutScale = layoutCfg.ringLayoutScale;
+                if (ringLayoutScale == null && typeof window.HOME_POINTER_RING_LAYOUT_SCALE === "number" && isFinite(window.HOME_POINTER_RING_LAYOUT_SCALE) && window.HOME_POINTER_RING_LAYOUT_SCALE > 0) ringLayoutScale = window.HOME_POINTER_RING_LAYOUT_SCALE;
+                if (ringLayoutScale == null) ringLayoutScale = 1;
+                var ringSize = size * ringLayoutScale;
+                ctx.drawImage(ringImg, cx - ringSize / 2, cy - ringSize / 2, ringSize, ringSize);
+            }}
+
+            for (var i = 0; i < n; i++) {{
+                var start = -Math.PI / 2 + i * anglePer + gapAngle - rotationOffset;
+                var end = -Math.PI / 2 + (i + 1) * anglePer - gapAngle - rotationOffset;
+                var mid = (start + end) / 2;
+                var apexR = rBase + (rUsableOuter - rBase) * (values[i] / maxVal);
+                var x1 = cx + rBase * Math.cos(start);
+                var y1 = cy + rBase * Math.sin(start);
+                var x2 = cx + rBase * Math.cos(end);
+                var y2 = cy + rBase * Math.sin(end);
+                var x3 = cx + apexR * Math.cos(mid);
+                var y3 = cy + apexR * Math.sin(mid);
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.lineTo(x3, y3);
+                ctx.closePath();
+                var c = colors[i] || "#64748b";
+                var leftTone = shadeHex(c, 0.18);
+                var rightTone = shadeHex(c, -0.18);
+                var grad = ctx.createLinearGradient(x1, y1, x2, y2);
+                grad.addColorStop(0, leftTone);
+                grad.addColorStop(0.55, c);
+                grad.addColorStop(1, rightTone);
+                ctx.fillStyle = grad;
+                ctx.fill();
+            }}
+
+            var titleEl = document.getElementById("home-pointer-chart-title");
+            if (titleEl) {{
+                var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+                var yMin = years[homeYearMinIdx];
+                var yMax = years[homeYearMaxIdx];
+                var base = "MDB Operations by SDG: " + (isAmountMode ? "Amount Share" : "Project Share");
+                var rangeTxt = "(" + (homeYearMinIdx === homeYearMaxIdx ? yMin : yMin + "–" + yMax) + ")";
+                if (typeof homeSelectedMdbIndex !== "undefined" && homeSelectedMdbIndex > 0 && window.MDB_NAMES && window.MDB_NAMES[homeSelectedMdbIndex - 1])
+                    titleEl.textContent = window.MDB_NAMES[homeSelectedMdbIndex - 1] + " " + base + " " + rangeTxt;
+                else
+                    titleEl.textContent = base + " " + rangeTxt;
+            }}
+
+            var centerTotal = document.getElementById("home-pointer-center-total");
+            var centerHint = document.getElementById("home-pointer-center-hint");
+            var centerHint2 = document.getElementById("home-pointer-center-hint-2");
+            if (centerTotal) {{
+                if (isAmountMode)
+                    centerTotal.textContent = (pieData.totalAmountUsd / 1e9).toFixed(2);
+                else
+                    centerTotal.textContent = (pieData.totalProjects && pieData.totalProjects.toLocaleString) ? pieData.totalProjects.toLocaleString() : (pieData.totalProjects || "0");
+            }}
+            if (centerHint) {{
+                centerHint.textContent = isAmountMode ? "Billion USD" : "Total Project";
+                centerHint.classList.toggle("bold", isAmountMode);
+            }}
+            if (centerHint2) {{
+                centerHint2.textContent = "Total Amount";
+                centerHint2.style.display = isAmountMode ? "block" : "none";
+            }}
+            var pTrack = document.getElementById("home-pointer-switch-track");
+            var pWrap = document.getElementById("home-pointer-metric-switch");
+            var pLeft = document.getElementById("home-pointer-metric-label-left");
+            var pRight = document.getElementById("home-pointer-metric-label-right");
+            var pointerBackBtn = document.getElementById("home-pointer-back-btn");
+            if (pTrack) pTrack.classList.toggle("on", !isAmountMode);
+            if (pWrap) pWrap.setAttribute("aria-checked", isAmountMode ? "false" : "true");
+            if (pLeft) pLeft.classList.toggle("active", !isAmountMode);
+            if (pRight) pRight.classList.toggle("active", isAmountMode);
+            if (pointerBackBtn) pointerBackBtn.classList.toggle("visible", (typeof homeSelectedMdbIndex !== "undefined" && homeSelectedMdbIndex > 0));
+
+            var ticksHost = document.getElementById("home-pointer-year-ticks");
+            var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            if (ticksHost) {{
+                if (!ticksHost.children.length) {{
+                    for (var yi = 0; yi < years.length; yi++) {{
+                        var span = document.createElement("span");
+                        span.textContent = String(years[yi]);
+                        span.setAttribute("data-year-idx", String(yi));
+                        ticksHost.appendChild(span);
+                    }}
+                }}
+                for (var ti = 0; ti < ticksHost.children.length; ti++) {{
+                    var el = ticksHost.children[ti];
+                    var on = ti >= homeYearMinIdx && ti <= homeYearMaxIdx;
+                    el.classList.toggle("active", on);
+                }}
+            }}
+        }}
+
+        function getHomeChordAggregatedMatrix() {{
+            var raw = window.MR_CHORD_FLOWS;
+            if (!raw || !raw.by_mdb) return null;
+            var mdbIdx = (typeof homeSelectedMdbIndex !== "undefined" ? homeSelectedMdbIndex : 0) || 0;
+            var block = raw.by_mdb[mdbIdx];
+            if (!block || !block.by_year) return null;
+            var n = 17;
+            var acc = [];
+            for (var a = 0; a < n; a++) {{
+                acc.push([]);
+                for (var b = 0; b < n; b++) acc[a].push(0);
+            }}
+            var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            var y0 = (typeof homeYearMinIdx === "number") ? homeYearMinIdx : 0;
+            var y1 = (typeof homeYearMaxIdx === "number") ? homeYearMaxIdx : 9;
+            if (y0 > y1) {{ var tmp = y0; y0 = y1; y1 = tmp; }}
+            for (var yi = y0; yi <= y1; yi++) {{
+                var M = block.by_year[String(years[yi])];
+                if (!M) continue;
+                for (var i = 0; i < n; i++) {{
+                    if (!M[i]) continue;
+                    for (var j = 0; j < n; j++) acc[i][j] += (M[i][j] || 0);
+                }}
+            }}
+            return acc;
+        }}
+
+        function drawHomeChordChart() {{
+            var canvas = document.getElementById("home-chord-canvas");
+            if (!canvas) return;
+            var wrap = canvas.closest(".home-pie-wrap");
+            if (!wrap) return;
+            var rect = wrap.getBoundingClientRect();
+            var canvasWidth = Math.floor(rect.width) || 480;
+            var canvasHeight = Math.floor(rect.height) || 480;
+            var size = Math.min(canvasWidth, canvasHeight);
+            var dpr = window.devicePixelRatio || 1;
+            canvas.width = canvasWidth * dpr;
+            canvas.height = canvasHeight * dpr;
+            canvas.style.width = canvasWidth + "px";
+            canvas.style.height = canvasHeight + "px";
+            var ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.scale(dpr, dpr);
+            ctx.imageSmoothingEnabled = true;
+            if (typeof ctx.imageSmoothingQuality === "string") ctx.imageSmoothingQuality = "high";
+            var cx = canvasWidth / 2;
+            var cy = canvasHeight / 2;
+            var mat = getHomeChordAggregatedMatrix();
+            var n = 17;
+            var sectorSt = [];
+            var sectorEn = [];
+            function sectorSpan(i) {{
+                return {{ st: sectorSt[i], en: sectorEn[i] }};
+            }}
+            function midAngle(i) {{
+                return (sectorSt[i] + sectorEn[i]) / 2;
+            }}
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            var chordBackBtn = document.getElementById("home-chord-back-btn");
+            if (chordBackBtn) chordBackBtn.classList.toggle("visible", (typeof homeSelectedMdbIndex !== "undefined" && homeSelectedMdbIndex > 0));
+            updateHomeChordLayoutButtonText();
+            var titleEl = document.getElementById("home-chord-chart-title");
+            var yearsLbl = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            var yMin = yearsLbl[homeYearMinIdx];
+            var yMax = yearsLbl[homeYearMaxIdx];
+            var rangeTxt = "(" + (homeYearMinIdx === homeYearMaxIdx ? String(yMin) : (yMin + "–" + yMax)) + ")";
+            var baseTitle = "SDG co-tagging flows (Most Relevant → other tags)";
+            if (titleEl) {{
+                if (typeof homeSelectedMdbIndex !== "undefined" && homeSelectedMdbIndex > 0 && window.MDB_NAMES && window.MDB_NAMES[homeSelectedMdbIndex - 1])
+                    titleEl.textContent = window.MDB_NAMES[homeSelectedMdbIndex - 1] + " " + baseTitle + " " + rangeTxt;
+                else
+                    titleEl.textContent = baseTitle + " " + rangeTxt;
+            }}
+            var totalEl = document.getElementById("home-chord-flow-total");
+            if (!mat) {{
+                if (totalEl) totalEl.textContent = "—";
+                ctx.fillStyle = "#64748b";
+                ctx.font = "600 14px 'Segoe UI', sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText("Chord data unavailable.", cx, cy);
+                return;
+            }}
+            /* 扇区弧长 ∝（独占+出+入）；扇区间留缝。流出沿内径从 en 顺时针（角度减小）按流量从大到小铺满；流入在逆时针端 en 与最大出流共点；独占驼峰向内 */
+            var mass = [];
+            var sumM = 0;
+            for (var km = 0; km < n; km++) {{
+                var diag = mat[km][km] || 0;
+                var outv = 0, inv = 0;
+                for (var jm = 0; jm < n; jm++) {{ if (jm !== km) outv += (mat[km][jm] || 0); }}
+                for (var im = 0; im < n; im++) {{ if (im !== km) inv += (mat[im][km] || 0); }}
+                var mm = diag + outv + inv;
+                mass.push(mm);
+                sumM += mm;
+            }}
+            var epsW = Math.max(1, sumM * 0.022 / n);
+            var sumW = 0;
+            var wgt = [];
+            for (var kw = 0; kw < n; kw++) {{ wgt.push(mass[kw] + epsW); sumW += wgt[kw]; }}
+            var sectorOrder = [];
+            for (var so = 0; so < n; so++) sectorOrder.push(so);
+            if (homeChordLayoutMode === "coocc") {{
+                var focusSrc = Number(homeChordSelectedSdgIndex) || 0;
+                var srcIdx = (focusSrc >= 1 && focusSrc <= n) ? (focusSrc - 1) : -1;
+                var score = new Array(n).fill(0);
+                if (srcIdx >= 0) {{
+                    /* 单源模式：与 chord 宽度同口径，按 mat[src][j] 在该源总量中的占比排序 */
+                    var srcTotal = 0;
+                    for (var sj = 0; sj < n; sj++) srcTotal += Number(mat[srcIdx][sj] || 0);
+                    for (var si = 0; si < n; si++) {{
+                        score[si] = srcTotal > 0 ? (Number(mat[srcIdx][si] || 0) / srcTotal) : 0;
+                    }}
+                }} else {{
+                    /* 全局模式：按目标节点在全体 MR→SDG 共现中的比例排序 */
+                    var allTotal = 0;
+                    for (var ai = 0; ai < n; ai++) {{
+                        for (var aj = 0; aj < n; aj++) allTotal += Number(mat[ai][aj] || 0);
+                    }}
+                    for (var iScore = 0; iScore < n; iScore++) {{
+                        var colSum = 0;
+                        for (var jScore = 0; jScore < n; jScore++) colSum += Number(mat[jScore][iScore] || 0);
+                        score[iScore] = allTotal > 0 ? (colSum / allTotal) : 0;
+                    }}
+                }}
+                sectorOrder.sort(function(a, b) {{
+                    var d = score[b] - score[a];
+                    if (d !== 0) return d;
+                    return a - b;
+                }});
+            }}
+            var twoPi = 2 * Math.PI;
+            var gapTotalFrac = 0.05;
+            var gapEach = gapTotalFrac * twoPi / n;
+            var arcAvail = twoPi * (1 - gapTotalFrac);
+            /* SDG1 左边界 + 半个扇区间隙对准 12 点方向（角度 -π/2） */
+            var cumAng = -Math.PI / 2 - gapEach / 2;
+            for (var slot = 0; slot < n; slot++) {{
+                var ks = sectorOrder[slot];
+                sectorSt[ks] = cumAng;
+                cumAng += arcAvail * wgt[ks] / sumW;
+                sectorEn[ks] = cumAng;
+                cumAng += gapEach;
+            }}
+            var rInW = size * 0.385;
+            var rOuW = size * 0.428;
+            var chordInsetPx = 20;
+            rInW = Math.max(rInW - chordInsetPx, size * 0.15);
+            rOuW = Math.max(rOuW - chordInsetPx, rInW + size * 0.02);
+            var colorsBg = window.SDG_COLORS || [];
+            /* 和弦与 SDG9 自环透镜填充；略提高不透明度使颜色更深 */
+            var chordFillAlpha = 0.58;
+            var links = [];
+            var maxV = 0;
+            var sumFlow = 0;
+            var sumDiag = 0;
+            for (var i = 0; i < n; i++) {{
+                sumDiag += (mat[i][i] || 0);
+                for (var j = 0; j < n; j++) {{
+                    if (i === j) continue;
+                    var v = mat[i][j] || 0;
+                    if (v <= 0) continue;
+                    links.push({{ i: i, j: j, v: v }});
+                    sumFlow += v;
+                    if (v > maxV) maxV = v;
+                }}
+            }}
+            if (sumDiag > maxV) maxV = sumDiag;
+            if (totalEl) {{
+                var totShow = sumFlow + sumDiag;
+                totalEl.textContent = (totShow && totShow.toLocaleString) ? totShow.toLocaleString() : String(totShow);
+            }}
+            links.sort(function(a, b) {{ return b.v - a.v; }});
+            var colors = window.SDG_COLORS || [];
+            function snapPt(px, py) {{
+                return {{ x: Math.round(px * dpr) / dpr, y: Math.round(py * dpr) / dpr }};
+            }}
+            /* 二次贝塞尔控制点取圆心：端点在内径上时切线沿直径（与圆正交） */
+            var pcCenter = {{ x: cx, y: cy }};
+            function quadBezierPt(p0, pc, p2, t) {{
+                var u = 1 - t;
+                return {{ x: u * u * p0.x + 2 * u * t * pc.x + t * t * p2.x, y: u * u * p0.y + 2 * u * t * pc.y + t * t * p2.y }};
+            }}
+            function quadBezierTanU(p0, pc, p2, t) {{
+                var u = 1 - t;
+                var tx = 2 * u * (pc.x - p0.x) + 2 * t * (p2.x - pc.x);
+                var ty = 2 * u * (pc.y - p0.y) + 2 * t * (p2.y - pc.y);
+                var L = Math.sqrt(tx * tx + ty * ty) || 1;
+                return {{ x: tx / L, y: ty / L }};
+            }}
+            function hexToRgbObj(hex) {{
+                var h = String(hex || "").replace(/^#/, "");
+                if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+                if (!/^[0-9a-fA-F]{{6}}$/.test(h)) return {{ r: 100, g: 116, b: 139 }};
+                return {{
+                    r: parseInt(h.slice(0, 2), 16),
+                    g: parseInt(h.slice(2, 4), 16),
+                    b: parseInt(h.slice(4, 6), 16)
+                }};
+            }}
+            function lerpColorHex(c0, c1, t) {{
+                var a = hexToRgbObj(c0), b = hexToRgbObj(c1);
+                var r = Math.round(a.r + (b.r - a.r) * t);
+                var g = Math.round(a.g + (b.g - a.g) * t);
+                var b2 = Math.round(a.b + (b.b - a.b) * t);
+                return "rgb(" + r + "," + g + "," + b2 + ")";
+            }}
+            /* 沿二次贝塞尔采样条带：底宽 w0（等分弦长），宽度按 t 等比收至 1px */
+            function fillTaperQuadRibbon(p0, pc, p2, w0, colorFrom, colorTo, alpha) {{
+                var steps = Math.max(20, Math.min(56, Math.ceil(Math.max(w0, 8))));
+                var up = [];
+                var lo = [];
+                for (var si = 0; si <= steps; si++) {{
+                    var t = si / steps;
+                    var pt = quadBezierPt(p0, pc, p2, t);
+                    var tn = quadBezierTanU(p0, pc, p2, t);
+                    var nx = -tn.y, ny = tn.x;
+                    var wAt = (w0 > 1.0001) ? Math.max(1, Math.pow(w0, 1 - t)) : (w0 * (1 - t) + t);
+                    var hw = wAt * 0.5;
+                    up.push({{ x: pt.x + nx * hw, y: pt.y + ny * hw }});
+                    lo.push({{ x: pt.x - nx * hw, y: pt.y - ny * hw }});
+                }}
+                ctx.globalAlpha = alpha;
+                for (var seg = 0; seg < steps; seg++) {{
+                    var tm = (seg + 0.5) / steps;
+                    ctx.beginPath();
+                    ctx.moveTo(up[seg].x, up[seg].y);
+                    ctx.lineTo(up[seg + 1].x, up[seg + 1].y);
+                    ctx.lineTo(lo[seg + 1].x, lo[seg + 1].y);
+                    ctx.lineTo(lo[seg].x, lo[seg].y);
+                    ctx.closePath();
+                    ctx.fillStyle = lerpColorHex(colorFrom || "#64748b", colorTo || colorFrom || "#64748b", tm);
+                    ctx.fill();
+                }}
+            }}
+            ctx.lineCap = "butt";
+            ctx.lineJoin = "miter";
+            ctx.lineWidth = 1;
+            function drawSourceChords(srcIdx) {{
+                var sp = sectorSpan(srcIdx);
+                var st = sp.st;
+                var en = sp.en;
+                var span = Math.max(en - st, 1e-9);
+                var srcColor = colors[srcIdx] || "#64748b";
+                /* 每个源 SDG：按项目数降序，源端弧段按项目数占比切分并从左到右排布（含自环）。 */
+                var chordDrawOrder = [];
+                for (var jo = 0; jo < n; jo++) {{
+                    var nProjects = Number(mat[srcIdx][jo]) || 0;
+                    if (nProjects > 0) chordDrawOrder.push({{ jm: jo, nProjects: nProjects }});
+                }}
+                chordDrawOrder.sort(function(a, b) {{
+                    var d = b.nProjects - a.nProjects;
+                    if (d !== 0) return d;
+                    return a.jm - b.jm;
+                }});
+                if (!chordDrawOrder.length) return;
+                var sumChordProjects = 0;
+                for (var qs = 0; qs < chordDrawOrder.length; qs++) sumChordProjects += chordDrawOrder[qs].nProjects;
+                var slotCursor = st;
+                for (var qi = 0; qi < chordDrawOrder.length; qi++) {{
+                    var jm = chordDrawOrder[qi].jm;
+                    var vSrc = Number(mat[srcIdx][jm]) || 0;
+                    var frac = (sumChordProjects > 0) ? (chordDrawOrder[qi].nProjects / sumChordProjects) : (1 / Math.max(1, chordDrawOrder.length));
+                    var slotSt = slotCursor;
+                    var slotEn = (qi === chordDrawOrder.length - 1) ? en : (slotSt + span * frac);
+                    slotCursor = slotEn;
+                    var slotMid = (slotSt + slotEn) * 0.5;
+                    var slotSpan = Math.max(slotEn - slotSt, 1e-9);
+                    var wSlotChord = 2 * rInW * Math.sin(slotSpan * 0.5);
+                    if (jm === srcIdx) {{
+                        if (vSrc > 0) {{
+                            var angLS = slotSt;
+                            var angRS = slotEn;
+                            var xSL = cx + rInW * Math.cos(angLS), ySL = cy + rInW * Math.sin(angLS);
+                            var pSL = snapPt(xSL, ySL);
+                            ctx.beginPath();
+                            ctx.moveTo(pSL.x, pSL.y);
+                            ctx.arc(cx, cy, rInW, angLS, angRS, false);
+                            ctx.quadraticCurveTo(pcCenter.x, pcCenter.y, pSL.x, pSL.y);
+                            ctx.closePath();
+                            ctx.fillStyle = srcColor;
+                            ctx.globalAlpha = chordFillAlpha;
+                            ctx.fill();
+                        }}
+                        continue;
+                    }}
+                    if (vSrc <= 0) continue;
+                    var x0 = cx + rInW * Math.cos(slotMid), y0 = cy + rInW * Math.sin(slotMid);
+                    var p0m = {{ x: x0, y: y0 }};
+                    var angE = sectorSt[jm];
+                    var xE = cx + rInW * Math.cos(angE), yE = cy + rInW * Math.sin(angE);
+                    var p1m = snapPt(xE, yE);
+                    var dstColor = colors[jm] || srcColor;
+                    fillTaperQuadRibbon(p0m, pcCenter, p1m, wSlotChord, srcColor, dstColor, chordFillAlpha);
+                }}
+            }}
+            var activeSrc = Number(homeChordSelectedSdgIndex) || 0;
+            if (activeSrc >= 1 && activeSrc <= n) drawSourceChords(activeSrc - 1);
+            else for (var src = 0; src < n; src++) drawSourceChords(src);
+            ctx.globalAlpha = 1;
+            /* 圆环不透明，盖在和弦之上 */
+            for (var kwg = 0; kwg < n; kwg++) {{
+                var st = sectorSt[kwg];
+                var en = sectorEn[kwg];
+                var col = colorsBg[kwg] || "#94a3b8";
+                ctx.beginPath();
+                ctx.moveTo(cx + rInW * Math.cos(st), cy + rInW * Math.sin(st));
+                ctx.lineTo(cx + rOuW * Math.cos(st), cy + rOuW * Math.sin(st));
+                ctx.arc(cx, cy, rOuW, st, en, false);
+                ctx.lineTo(cx + rInW * Math.cos(en), cy + rInW * Math.sin(en));
+                ctx.arc(cx, cy, rInW, en, st, true);
+                ctx.closePath();
+                ctx.fillStyle = col;
+                ctx.globalAlpha = 1;
+                ctx.fill();
+            }}
+            /* 与 rOuW 同步内移即可；勿再额外减像素，否则会贴住圆环外缘 */
+            var rLab = rOuW + size * 0.048;
+            ctx.font = "600 22px 'Segoe UI', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            for (var kl = 0; kl < n; kl++) {{
+                var am = midAngle(kl);
+                var tx = cx + rLab * Math.cos(am);
+                var ty = cy + rLab * Math.sin(am);
+                var colL = colorsBg[kl] || "#334155";
+                ctx.save();
+                ctx.translate(tx, ty);
+                ctx.rotate(am);
+                ctx.fillStyle = colL;
+                ctx.globalAlpha = 1;
+                ctx.fillText("SDG " + (kl + 1), 0, 0);
+                ctx.restore();
+            }}
+            ctx.globalAlpha = 1;
+        }}
+
+        function getMdbChordAggregatedMatrix() {{
+            var raw = window.MR_CHORD_FLOWS;
+            if (!raw || !raw.by_mdb) return null;
+            var mdbIdx = (typeof homeSelectedMdbIndex !== "undefined" ? homeSelectedMdbIndex : 0) || 0;
+            var block = raw.by_mdb[mdbIdx];
+            if (!block || !block.by_year) return null;
+            var n = 17;
+            var acc = [];
+            for (var a = 0; a < n; a++) {{
+                acc.push([]);
+                for (var b = 0; b < n; b++) acc[a].push(0);
+            }}
+            var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            var y0 = (typeof window._mdbYearMinIdx === "number") ? window._mdbYearMinIdx : 0;
+            var y1 = (typeof window._mdbYearMaxIdx === "number") ? window._mdbYearMaxIdx : 9;
+            if (y0 > y1) {{ var tmp = y0; y0 = y1; y1 = tmp; }}
+            for (var yi = y0; yi <= y1; yi++) {{
+                var M = block.by_year[String(years[yi])];
+                if (!M) continue;
+                for (var i = 0; i < n; i++) {{
+                    if (!M[i]) continue;
+                    for (var j = 0; j < n; j++) acc[i][j] += (M[i][j] || 0);
+                }}
+            }}
+            return acc;
+        }}
+
+        function drawMdbChordChart() {{
+            var canvas = document.getElementById("mdb-chord-canvas");
+            if (!canvas) return;
+            var wrap = canvas.closest(".home-pie-wrap");
+            if (!wrap) return;
+            var rect = wrap.getBoundingClientRect();
+            var canvasWidth = Math.floor(rect.width) || 480;
+            var canvasHeight = Math.floor(rect.height) || 480;
+            var size = Math.min(canvasWidth, canvasHeight);
+            var dpr = window.devicePixelRatio || 1;
+            canvas.width = canvasWidth * dpr;
+            canvas.height = canvasHeight * dpr;
+            canvas.style.width = canvasWidth + "px";
+            canvas.style.height = canvasHeight + "px";
+            canvas.style.marginBottom = "0px";
+            var ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.scale(dpr, dpr);
+            ctx.imageSmoothingEnabled = true;
+            if (typeof ctx.imageSmoothingQuality === "string") ctx.imageSmoothingQuality = "high";
+            var cx = canvasWidth / 2;
+            var cy = canvasHeight / 2 + 22;
+            var mat = getMdbChordAggregatedMatrix();
+            var n = 17;
+            var sectorSt = [];
+            var sectorEn = [];
+            function sectorSpan(i) {{ return {{ st: sectorSt[i], en: sectorEn[i] }}; }}
+            function midAngle(i) {{ return (sectorSt[i] + sectorEn[i]) / 2; }}
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            var chordBackBtn = document.getElementById("mdb-chord-back-btn");
+            if (chordBackBtn) chordBackBtn.classList.toggle("visible", (typeof homeSelectedMdbIndex !== "undefined" && homeSelectedMdbIndex > 0));
+            updateMdbChordLayoutButtonText();
+            var titleEl = document.getElementById("mdb-chord-chart-title");
+            var yearsLbl = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            var y0idx = (typeof window._mdbYearMinIdx === "number") ? window._mdbYearMinIdx : 0;
+            var y1idx = (typeof window._mdbYearMaxIdx === "number") ? window._mdbYearMaxIdx : 9;
+            var yMin = yearsLbl[y0idx];
+            var yMax = yearsLbl[y1idx];
+            var rangeTxt = "(" + (y0idx === y1idx ? String(yMin) : (yMin + "–" + yMax)) + ")";
+            var baseTitle = "SDG co-tagging flows (Most Relevant → other tags)";
+            if (titleEl) {{
+                if (typeof homeSelectedMdbIndex !== "undefined" && homeSelectedMdbIndex > 0 && window.MDB_NAMES && window.MDB_NAMES[homeSelectedMdbIndex - 1])
+                    titleEl.textContent = window.MDB_NAMES[homeSelectedMdbIndex - 1] + " " + baseTitle + " " + rangeTxt;
+                else
+                    titleEl.textContent = baseTitle + " " + rangeTxt;
+            }}
+            var totalEl = document.getElementById("mdb-chord-flow-total");
+            if (!mat) {{
+                if (totalEl) totalEl.textContent = "—";
+                ctx.fillStyle = "#64748b";
+                ctx.font = "600 14px 'Segoe UI', sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText("Chord data unavailable.", cx, cy);
+                return;
+            }}
+            /* MDB chord arc allocation by total SDG-tagged projects (column sum), not MR-only mass. */
+            var tagTotals = new Array(n).fill(0);
+            var sumM = 0;
+            for (var km = 0; km < n; km++) {{
+                var tagged = 0;
+                for (var im = 0; im < n; im++) tagged += Number(mat[im][km] || 0);
+                tagTotals[km] = tagged;
+                sumM += tagged;
+            }}
+            var epsW = Math.max(1, sumM * 0.022 / n);
+            var sumW = 0;
+            var wgt = [];
+            for (var kw = 0; kw < n; kw++) {{ wgt.push(tagTotals[kw] + epsW); sumW += wgt[kw]; }}
+            var sectorOrder = [];
+            for (var so = 0; so < n; so++) sectorOrder.push(so);
+            if (mdbChordLayoutMode === "coocc") {{
+                var score = new Array(n).fill(0);
+                var allTotal = 0;
+                for (var ai = 0; ai < n; ai++) for (var aj = 0; aj < n; aj++) allTotal += Number(mat[ai][aj] || 0);
+                for (var iScore = 0; iScore < n; iScore++) {{
+                    var colSum = 0;
+                    for (var jScore = 0; jScore < n; jScore++) colSum += Number(mat[jScore][iScore] || 0);
+                    score[iScore] = allTotal > 0 ? (colSum / allTotal) : 0;
+                }}
+                sectorOrder.sort(function(a, b) {{
+                    var d = score[b] - score[a];
+                    if (d !== 0) return d;
+                    return a - b;
+                }});
+            }}
+            var twoPi = 2 * Math.PI;
+            var gapTotalFrac = 0.05;
+            var gapEach = gapTotalFrac * twoPi / n;
+            var arcAvail = twoPi * (1 - gapTotalFrac);
+            /* 12 o'clock alignment: left edge of first sector + half gap aligns to top. */
+            var cumAng = -Math.PI / 2 - gapEach / 2;
+            for (var slot = 0; slot < n; slot++) {{
+                var ks = sectorOrder[slot];
+                sectorSt[ks] = cumAng;
+                cumAng += arcAvail * wgt[ks] / sumW;
+                sectorEn[ks] = cumAng;
+                cumAng += gapEach;
+            }}
+            var rInW = size * 0.385;
+            var rOuW = size * 0.428;
+            var chordInsetPx = 20;
+            rInW = Math.max(rInW - chordInsetPx, size * 0.15);
+            rOuW = Math.max(rOuW - chordInsetPx, rInW + size * 0.02);
+            /* Inbound chord: body ends at ring-4, radial taper to ring-3 (aligned with Fig. 2 / Fig. 4). */
+            var chordInputEndInsetPx = 12;
+            var chordInputTipBandPx = 6;
+            var colorsBg = window.SDG_COLORS || [];
+            var chordFillAlpha = 0.58;
+            var sumFlow = 0, sumDiag = 0;
+            for (var i = 0; i < n; i++) {{
+                sumDiag += (mat[i][i] || 0);
+                for (var j = 0; j < n; j++) {{ if (i !== j) sumFlow += (mat[i][j] || 0); }}
+            }}
+            if (totalEl) {{
+                var totShow = sumFlow + sumDiag;
+                totalEl.textContent = (totShow && totShow.toLocaleString) ? totShow.toLocaleString() : String(totShow);
+            }}
+            function snapPt(px, py) {{ return {{ x: Math.round(px * dpr) / dpr, y: Math.round(py * dpr) / dpr }}; }}
+            var pcCenter = {{ x: cx, y: cy }};
+            var chordSelfLoopBulge = 0.42;
+            /* Per-SDG arc segmentation (left->right):
+               1) most relevant projects (row, incl self) high->low
+               2) not-most-relevant inputs (column except self) high->low */
+            var mrSlotMap = [];
+            var inboundSlotMap = [];
+            for (var sdx = 0; sdx < n; sdx++) {{
+                var stArc = sectorSt[sdx];
+                var enArc = sectorEn[sdx];
+                var spanArc = Math.max(enArc - stArc, 1e-9);
+                var mrList = [];
+                var inList = [];
+                var mrTotal = 0;
+                var inTotal = 0;
+                for (var jd = 0; jd < n; jd++) {{
+                    var vMr = Number(mat[sdx][jd] || 0);
+                    if (vMr > 0) {{ mrList.push({{ dst: jd, v: vMr }}); mrTotal += vMr; }}
+                }}
+                for (var si = 0; si < n; si++) {{
+                    if (si === sdx) continue;
+                    var vIn = Number(mat[si][sdx] || 0);
+                    if (vIn > 0) {{ inList.push({{ src: si, v: vIn }}); inTotal += vIn; }}
+                }}
+                mrList.sort(function(a, b) {{ return (b.v - a.v) || (a.dst - b.dst); }});
+                inList.sort(function(a, b) {{ return (b.v - a.v) || (a.src - b.src); }});
+                var totalSeg = mrTotal + inTotal;
+                var mrSpan = totalSeg > 0 ? (spanArc * (mrTotal / totalSeg)) : 0;
+                var inSpan = spanArc - mrSpan;
+                var mrSlots = {{}};
+                var inSlots = {{}};
+                var cursorMr = stArc;
+                for (var mi = 0; mi < mrList.length; mi++) {{
+                    var oneMr = mrList[mi];
+                    var fracMr = mrTotal > 0 ? (oneMr.v / mrTotal) : 0;
+                    var segMrSt = cursorMr;
+                    var segMrEn = (mi === mrList.length - 1) ? (stArc + mrSpan) : (segMrSt + mrSpan * fracMr);
+                    cursorMr = segMrEn;
+                    var segMrSpan = Math.max(segMrEn - segMrSt, 1e-9);
+                    mrSlots[oneMr.dst] = {{
+                        st: segMrSt,
+                        en: segMrEn,
+                        mid: (segMrSt + segMrEn) * 0.5,
+                        width: 2 * rInW * Math.sin(segMrSpan * 0.5)
+                    }};
+                }}
+                var cursorIn = stArc + mrSpan;
+                for (var ii = 0; ii < inList.length; ii++) {{
+                    var oneIn = inList[ii];
+                    var fracIn = inTotal > 0 ? (oneIn.v / inTotal) : 0;
+                    var segInSt = cursorIn;
+                    var segInEn = (ii === inList.length - 1) ? enArc : (segInSt + inSpan * fracIn);
+                    cursorIn = segInEn;
+                    var segInSpan = Math.max(segInEn - segInSt, 1e-9);
+                    inSlots[oneIn.src] = {{
+                        st: segInSt,
+                        en: segInEn,
+                        mid: (segInSt + segInEn) * 0.5,
+                        width: 2 * rInW * Math.sin(segInSpan * 0.5)
+                    }};
+                }}
+                mrSlotMap[sdx] = mrSlots;
+                inboundSlotMap[sdx] = inSlots;
+            }}
+            function quadBezierPt(p0, pc, p2, t) {{
+                var u = 1 - t;
+                return {{ x: u * u * p0.x + 2 * u * t * pc.x + t * t * p2.x, y: u * u * p0.y + 2 * u * t * pc.y + t * t * p2.y }};
+            }}
+            function quadBezierTanU(p0, pc, p2, t) {{
+                var u = 1 - t;
+                var tx = 2 * u * (pc.x - p0.x) + 2 * t * (p2.x - pc.x);
+                var ty = 2 * u * (pc.y - p0.y) + 2 * t * (p2.y - pc.y);
+                var L = Math.sqrt(tx * tx + ty * ty) || 1;
+                return {{ x: tx / L, y: ty / L }};
+            }}
+            function hexToRgbObj(hex) {{
+                var h = String(hex || "").replace(/^#/, "");
+                if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+                if (!/^[0-9a-fA-F]{{6}}$/.test(h)) return {{ r: 100, g: 116, b: 139 }};
+                return {{ r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) }};
+            }}
+            function lerpColorHex(c0, c1, t) {{
+                var a = hexToRgbObj(c0), b = hexToRgbObj(c1);
+                var r = Math.round(a.r + (b.r - a.r) * t);
+                var g = Math.round(a.g + (b.g - a.g) * t);
+                var b2 = Math.round(a.b + (b.b - a.b) * t);
+                return "rgb(" + r + "," + g + "," + b2 + ")";
+            }}
+            function fillTaperQuadRibbon(p0, pc, p2, w0, w1, colorFrom, colorTo, alpha) {{
+                var steps = Math.max(20, Math.min(56, Math.ceil(Math.max(w0, 8))));
+                var up = [], lo = [];
+                for (var si = 0; si <= steps; si++) {{
+                    var t = si / steps;
+                    var pt = quadBezierPt(p0, pc, p2, t);
+                    var tn = quadBezierTanU(p0, pc, p2, t);
+                    var nx = -tn.y, ny = tn.x;
+                    var wAt = Math.max(1, (w0 * (1 - t) + w1 * t));
+                    var hw = wAt * 0.5;
+                    up.push({{ x: pt.x + nx * hw, y: pt.y + ny * hw }});
+                    lo.push({{ x: pt.x - nx * hw, y: pt.y - ny * hw }});
+                }}
+                ctx.globalAlpha = alpha;
+                var solid = colorFrom || "#64748b";
+                for (var seg = 0; seg < steps; seg++) {{
+                    ctx.beginPath();
+                    ctx.moveTo(up[seg].x, up[seg].y);
+                    ctx.lineTo(up[seg + 1].x, up[seg + 1].y);
+                    ctx.lineTo(lo[seg + 1].x, lo[seg + 1].y);
+                    ctx.lineTo(lo[seg].x, lo[seg].y);
+                    ctx.closePath();
+                    ctx.fillStyle = solid;
+                    ctx.fill();
+                }}
+            }}
+            function drawSourceChords(srcIdx) {{
+                var srcColor = colorsBg[srcIdx] || "#64748b";
+                var chordDrawOrder = [];
+                for (var jo = 0; jo < n; jo++) {{
+                    var nProjects = Number(mat[srcIdx][jo]) || 0;
+                    if (nProjects > 0) chordDrawOrder.push({{ jm: jo, nProjects: nProjects }});
+                }}
+                chordDrawOrder.sort(function(a, b) {{ return (b.nProjects - a.nProjects) || (a.jm - b.jm); }});
+                if (!chordDrawOrder.length) return;
+                for (var qi = 0; qi < chordDrawOrder.length; qi++) {{
+                    var jm = chordDrawOrder[qi].jm;
+                    var vSrc = Number(mat[srcIdx][jm]) || 0;
+                    var mrSlot = mrSlotMap[srcIdx] ? mrSlotMap[srcIdx][jm] : null;
+                    if (!mrSlot) continue;
+                    var slotSt = mrSlot.st;
+                    var slotEn = mrSlot.en;
+                    var slotMid = mrSlot.mid;
+                    var wSlotChord = mrSlot.width;
+                    if (jm === srcIdx) {{
+                        if (vSrc > 0) {{
+                            var xSL = cx + rInW * Math.cos(slotSt), ySL = cy + rInW * Math.sin(slotSt);
+                            var xSR = cx + rInW * Math.cos(slotEn), ySR = cy + rInW * Math.sin(slotEn);
+                            var mxs = (xSL + xSR) * 0.5, mys = (ySL + ySR) * 0.5;
+                            var kSl = chordSelfLoopBulge;
+                            var pcSelf = {{ x: mxs + (cx - mxs) * kSl, y: mys + (cy - mys) * kSl }};
+                            var pSL = snapPt(xSL, ySL);
+                            ctx.beginPath();
+                            ctx.moveTo(pSL.x, pSL.y);
+                            ctx.arc(cx, cy, rInW, slotSt, slotEn, false);
+                            ctx.quadraticCurveTo(pcSelf.x, pcSelf.y, pSL.x, pSL.y);
+                            ctx.closePath();
+                            ctx.fillStyle = srcColor;
+                            ctx.globalAlpha = chordFillAlpha;
+                            ctx.fill();
+                        }}
+                        continue;
+                    }}
+                    if (vSrc <= 0) continue;
+                    var p0m = {{ x: cx + rInW * Math.cos(slotMid), y: cy + rInW * Math.sin(slotMid) }};
+                    var inSlot = inboundSlotMap[jm] ? inboundSlotMap[jm][srcIdx] : null;
+                    var inMid = inSlot ? inSlot.mid : ((sectorSt[jm] + sectorEn[jm]) * 0.5);
+                    var inW = inSlot ? inSlot.width : Math.max(1, wSlotChord * 0.4);
+                    var wBody = Math.max(1, inW);
+                    var rEnd = Math.max(1, rInW - chordInputEndInsetPx);
+                    var tipBandEff = Math.max(1, Math.min(chordInputTipBandPx, chordInputEndInsetPx - 1));
+                    var rTipStart = Math.max(1, rEnd + tipBandEff);
+                    var p1m = snapPt(cx + rEnd * Math.cos(inMid), cy + rEnd * Math.sin(inMid));
+                    fillTaperQuadRibbon(p0m, pcCenter, p1m, wBody, wBody, srcColor, srcColor, chordFillAlpha);
+                    var dirx = Math.cos(inMid), diry = Math.sin(inMid), nx = -diry, ny = dirx;
+                    var tailSteps = Math.max(8, Math.min(24, Math.ceil((rTipStart - rEnd) * 1.5)));
+                    var upT = [], loT = [];
+                    for (var ts = 0; ts <= tailSteps; ts++) {{
+                        var uu = ts / tailSteps;
+                        var rr = rEnd * (1 - uu) + rTipStart * uu;
+                        var px = cx + rr * dirx, py = cy + rr * diry;
+                        var wNow = wBody * (1 - uu) + 1 * uu;
+                        var hw = Math.max(0.5, wNow * 0.5);
+                        upT.push({{ x: px + nx * hw, y: py + ny * hw }});
+                        loT.push({{ x: px - nx * hw, y: py - ny * hw }});
+                    }}
+                    ctx.globalAlpha = chordFillAlpha;
+                    ctx.fillStyle = srcColor;
+                    for (var tg = 0; tg < tailSteps; tg++) {{
+                        ctx.beginPath();
+                        ctx.moveTo(upT[tg].x, upT[tg].y);
+                        ctx.lineTo(upT[tg + 1].x, upT[tg + 1].y);
+                        ctx.lineTo(loT[tg + 1].x, loT[tg + 1].y);
+                        ctx.lineTo(loT[tg].x, loT[tg].y);
+                        ctx.closePath();
+                        ctx.fill();
+                    }}
+                }}
+            }}
+            for (var src = 0; src < n; src++) drawSourceChords(src);
+            ctx.globalAlpha = 1;
+            for (var kwg = 0; kwg < n; kwg++) {{
+                var st = sectorSt[kwg], en = sectorEn[kwg];
+                var col = colorsBg[kwg] || "#94a3b8";
+                ctx.beginPath();
+                ctx.moveTo(cx + rInW * Math.cos(st), cy + rInW * Math.sin(st));
+                ctx.lineTo(cx + rOuW * Math.cos(st), cy + rOuW * Math.sin(st));
+                ctx.arc(cx, cy, rOuW, st, en, false);
+                ctx.lineTo(cx + rInW * Math.cos(en), cy + rInW * Math.sin(en));
+                ctx.arc(cx, cy, rInW, en, st, true);
+                ctx.closePath();
+                ctx.fillStyle = col;
+                ctx.fill();
+            }}
+            var rLab = rOuW + size * 0.048;
+            ctx.font = "600 22px 'Segoe UI', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            for (var kl = 0; kl < n; kl++) {{
+                var am = midAngle(kl);
+                ctx.save();
+                ctx.translate(cx + rLab * Math.cos(am), cy + rLab * Math.sin(am));
+                ctx.rotate(am);
+                ctx.fillStyle = colorsBg[kl] || "#334155";
+                ctx.fillText("SDG " + (kl + 1), 0, 0);
+                ctx.restore();
+            }}
+        }}
+
+        function drawHomeScatterChart() {{
+            var canvas = document.getElementById("home-scatter-canvas");
+            if (!canvas) return;
+            var wrap = canvas.closest(".home-pie-wrap");
+            if (!wrap) return;
+            var rect = wrap.getBoundingClientRect();
+            var canvasWidth = Math.floor(rect.width) || 480;
+            var canvasHeight = Math.floor(rect.height) || 480;
+            var dpr = window.devicePixelRatio || 1;
+            canvas.width = canvasWidth * dpr;
+            canvas.height = canvasHeight * dpr;
+            canvas.style.width = canvasWidth + "px";
+            canvas.style.height = canvasHeight + "px";
+            var ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.scale(dpr, dpr);
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+            var mdbIndex = (typeof homeSelectedMdbIndex !== "undefined" ? homeSelectedMdbIndex : 0) || 0;
+            var titleEl = document.getElementById("home-scatter-chart-title");
+            var yearsLbl = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            var yMin = yearsLbl[homeYearMinIdx];
+            var yMax = yearsLbl[homeYearMaxIdx];
+            var rangeTxt = "(" + (homeYearMinIdx === homeYearMaxIdx ? String(yMin) : (yMin + "–" + yMax)) + ")";
+            if (titleEl) {{
+                var baseT = "MR-SDG profile by SDG: avg project share vs avg/median project amount ";
+                if (mdbIndex > 0 && window.MDB_NAMES && window.MDB_NAMES[mdbIndex - 1]) titleEl.textContent = window.MDB_NAMES[mdbIndex - 1] + " " + baseT + rangeTxt;
+                else titleEl.textContent = baseT + rangeTxt;
+            }}
+
+            var scatterData = getHomeScatterDataForYearRange();
+            if (!scatterData || !scatterData.points || !scatterData.points.length) {{
+                ctx.fillStyle = "#64748b";
+                ctx.font = "600 14px 'Segoe UI', sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText("Scatter data unavailable.", canvasWidth / 2, canvasHeight / 2);
+                return;
+            }}
+            var scatterBackBtn = document.getElementById("home-scatter-back-btn");
+            if (scatterBackBtn) scatterBackBtn.classList.toggle("visible", mdbIndex > 0);
+            var points = scatterData.points;
+            var colors = window.SDG_COLORS || [];
+
+            var padL = 118, padR = 40, padT = 34, padB = 84;
+            var plotW = Math.max(40, canvasWidth - padL - padR);
+            var plotH = Math.max(40, canvasHeight - padT - padB);
+            var SCATTER_X_UNIT = 0.05;
+            var SCATTER_Y_UNIT = 50e6;
+            var SCATTER_N_DIV = 5;
+            function snapScatterAxisMax(raw, unit) {{
+                var padded = Math.max(raw * 1.04, unit);
+                return Math.ceil(padded / unit - 1e-12) * unit;
+            }}
+            function formatMoneyTick(v) {{
+                if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
+                var m = v / 1e6;
+                return (Math.abs(m - Math.round(m)) < 1e-6 ? String(Math.round(m)) : m.toFixed(1)) + "M";
+            }}
+            var rawMaxX = 0;
+            var rawMaxY = 0;
+            for (var ai = 0; ai < points.length; ai++) {{
+                if (points[ai].count <= 0) continue;
+                if (points[ai].xAvgShare > rawMaxX) rawMaxX = points[ai].xAvgShare;
+                var yPeak = Math.max(points[ai].yAvgAmtUsd || 0, points[ai].q2 || 0);
+                if (yPeak > rawMaxY) rawMaxY = yPeak;
+            }}
+            var maxX = snapScatterAxisMax(Math.max(rawMaxX, 0.01), SCATTER_X_UNIT);
+            var maxY = snapScatterAxisMax(Math.max(rawMaxY, 1), SCATTER_Y_UNIT);
+            var xStep = maxX / SCATTER_N_DIV;
+            var yStep = maxY / SCATTER_N_DIV;
+            var nGridX = SCATTER_N_DIV;
+            var nGridY = SCATTER_N_DIV;
+            function sx(x) {{
+                var xc = Math.max(0, Math.min(x, maxX));
+                return padL + (xc / maxX) * plotW;
+            }}
+            function sy(y) {{
+                var yc = Math.max(0, Math.min(y, maxY));
+                return padT + plotH - (yc / maxY) * plotH;
+            }}
+
+            ctx.strokeStyle = "#e2e8f0";
+            ctx.lineWidth = 1;
+            ctx.fillStyle = "#475569";
+            ctx.font = "600 16px 'Segoe UI', sans-serif";
+            ctx.textAlign = "right";
+            ctx.textBaseline = "middle";
+            for (var gy = 0; gy <= nGridY; gy++) {{
+                var yv = yStep * gy;
+                var ypix = sy(yv);
+                ctx.beginPath();
+                ctx.moveTo(padL, ypix);
+                ctx.lineTo(padL + plotW, ypix);
+                ctx.stroke();
+                var yLabel = formatMoneyTick(yv);
+                ctx.fillText(yLabel, padL - 8, ypix);
+            }}
+            ctx.textAlign = "center";
+            ctx.textBaseline = "top";
+            for (var gx = 0; gx <= nGridX; gx++) {{
+                var xv = xStep * gx;
+                var xpix = sx(xv);
+                ctx.beginPath();
+                ctx.moveTo(xpix, padT);
+                ctx.lineTo(xpix, padT + plotH);
+                ctx.stroke();
+                var xPct = xv * 100;
+                var xDec = (Math.abs(xPct - Math.round(xPct)) < 1e-6) ? 0 : 1;
+                ctx.fillText(xPct.toFixed(xDec) + "%", xpix, padT + plotH + 10);
+            }}
+
+            ctx.strokeStyle = "#334155";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(padL, padT);
+            ctx.lineTo(padL, padT + plotH);
+            ctx.lineTo(padL + plotW, padT + plotH);
+            ctx.stroke();
+
+            ctx.fillStyle = "#0f172a";
+            ctx.font = "700 17px 'Segoe UI', sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("Average share of MR-SDG projects in MDB total projects", padL + plotW / 2, canvasHeight - 18);
+            ctx.save();
+            ctx.translate(28, padT + plotH / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText("Project amount per SDG (USD)", 0, 0);
+            ctx.restore();
+            var markerR = 9;
+            for (var p = 0; p < points.length; p++) {{
+                var pt = points[p];
+                if (pt.count <= 0) continue;
+                var xBox = sx(pt.xAvgShare);
+                var col = colors[p] || "#64748b";
+                var yAvg = sy(pt.yAvgAmtUsd || 0);
+                var yMed = sy(pt.q2 || 0);
+
+                ctx.beginPath();
+                ctx.arc(xBox, yAvg, markerR, 0, Math.PI * 2);
+                ctx.fillStyle = col;
+                ctx.globalAlpha = 0.86;
+                ctx.fill();
+                ctx.globalAlpha = 1;
+                ctx.strokeStyle = "#0f172a";
+                ctx.lineWidth = 1.4;
+                ctx.stroke();
+
+                /* Median marker: filled diamond in SDG color */
+                ctx.beginPath();
+                ctx.moveTo(xBox, yMed - markerR);
+                ctx.lineTo(xBox + markerR, yMed);
+                ctx.lineTo(xBox, yMed + markerR);
+                ctx.lineTo(xBox - markerR, yMed);
+                ctx.closePath();
+                ctx.fillStyle = col;
+                ctx.globalAlpha = 0.95;
+                ctx.fill();
+                ctx.globalAlpha = 1;
+                ctx.strokeStyle = "#0f172a";
+                ctx.lineWidth = 1.3;
+                ctx.stroke();
+
+                ctx.fillStyle = "#0f172a";
+                ctx.font = "700 14px 'Segoe UI', sans-serif";
+                ctx.textAlign = "left";
+                ctx.textBaseline = "middle";
+                var yLblAvg = yAvg + ((p % 2 === 0) ? -14 : 14);
+                yLblAvg = Math.max(padT + 12, Math.min(padT + plotH - 12, yLblAvg));
+                ctx.fillText("SDG " + pt.sdg + " avg", xBox + 12, yLblAvg);
+                ctx.fillStyle = "#475569";
+                ctx.font = "600 13px 'Segoe UI', sans-serif";
+                var yLblMed = yMed + ((p % 2 === 0) ? 14 : -14);
+                yLblMed = Math.max(padT + 12, Math.min(padT + plotH - 12, yLblMed));
+                ctx.fillText("SDG " + pt.sdg + " med", xBox + 12, yLblMed);
+            }}
+            ctx.fillStyle = "#334155";
+            ctx.font = "700 15px 'Segoe UI', sans-serif";
+            ctx.textAlign = "right";
+            ctx.textBaseline = "top";
+            ctx.fillText("Circle = average amount   Diamond = median amount", padL + plotW - 6, padT + 4);
+        }}
+
+        function updateHomeTotalsForYearRange() {{
+            var pieData = getHomePieDataForYearRange();
+            var projEl = document.getElementById("home-totals-projects-n");
+            var amountEl = document.getElementById("home-totals-amount-n");
+            var amountUnitEl = document.getElementById("home-totals-amount-unit");
+            if (projEl) projEl.textContent = (pieData.totalProjects && pieData.totalProjects.toLocaleString) ? pieData.totalProjects.toLocaleString() : (pieData.totalProjects || "—");
+            var totalAmountB = pieData.totalAmountUsd / 1e9;
+            if (amountEl) {{
+                if (totalAmountB >= 2000) {{
+                    amountEl.textContent = (pieData.totalAmountUsd / 1e12).toFixed(2);
+                    if (amountUnitEl) amountUnitEl.textContent = "Trillion USD";
+                }} else {{
+                    amountEl.textContent = (totalAmountB > 0 && totalAmountB.toFixed) ? totalAmountB.toFixed(1) : (totalAmountB || "—");
+                    if (amountUnitEl) amountUnitEl.textContent = "Billion USD";
+                }}
+            }}
+        }}
+
+        window.initHomePieAndSlider = function() {{
+            var sliderTrack = document.getElementById("home-year-slider-track");
+            var sliderTicks = document.getElementById("home-year-slider-ticks");
+            var sliderRange = document.getElementById("home-year-slider-range");
+            var handleMin = document.getElementById("home-handle-min");
+            var handleMax = document.getElementById("home-handle-max");
+            var pointerSliderTrack = document.getElementById("home-pointer-year-slider-track");
+            var pointerSliderTicks = document.getElementById("home-pointer-year-ticks");
+            var pointerSliderRange = document.getElementById("home-pointer-year-slider-range");
+            var pointerHandleMin = document.getElementById("home-pointer-handle-min");
+            var pointerHandleMax = document.getElementById("home-pointer-handle-max");
+            if (!sliderTrack) return;
+            if (typeof window._homeCancelYearSliderAnim === "function") window._homeCancelYearSliderAnim();
+            var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+            if (sliderTicks) {{
+                sliderTicks.innerHTML = "";
+                for (var i = 0; i < years.length; i++) {{
+                    var span = document.createElement("span");
+                    span.textContent = String(years[i]);
+                    span.title = "Show data for " + years[i] + " only";
+                    sliderTicks.appendChild(span);
+                }}
+            }}
+            if (pointerSliderTicks) {{
+                pointerSliderTicks.innerHTML = "";
+                for (var pi = 0; pi < years.length; pi++) {{
+                    var pspan = document.createElement("span");
+                    pspan.textContent = String(years[pi]);
+                    pspan.setAttribute("data-year-idx", String(pi));
+                    pspan.title = "Show data for " + years[pi] + " only";
+                    pointerSliderTicks.appendChild(pspan);
+                }}
+            }}
+            var trackLeft = 0;
+            var trackRight = 0;
+            var offsetPx = 8;
+            var railShiftPx = 1; /* 微调：滑轨相对年份标签横向偏移(px)，正数右移 */
+            var hXMinPx = 0;
+            var hXMaxPx = 0;
+            var hPointerMinPx = 0;
+            var hPointerMaxPx = 0;
+            var homeTickCenters = [];
+            var sliderRail = sliderTrack ? sliderTrack.querySelector(".year-slider-rail") : null;
+            var pointerSliderRail = pointerSliderTrack ? pointerSliderTrack.querySelector(".year-slider-rail") : null;
+            function homeSetYearHandleVisuals(hMin, hMax, rangeEl, leftPx, rightPx) {{
+                if (hMin) hMin.style.left = leftPx + "px";
+                if (hMax) hMax.style.left = rightPx + "px";
+                if (rangeEl) {{ rangeEl.style.left = leftPx + "px"; rangeEl.style.width = Math.max(0, rightPx - leftPx) + "px"; }}
+            }}
+            function homeLayoutYearSliderTrack(trackEl, ticksEl, railEl, mi, ma) {{
+                if (!trackEl) return null;
+                var rect = trackEl.getBoundingClientRect();
+                if (rect.width <= 0) return null;
+                var centers = [];
+                if (ticksEl && ticksEl.children.length === years.length) {{
+                    var tr = trackEl.getBoundingClientRect();
+                    for (var ci = 0; ci < years.length; ci++) {{
+                        var sp = ticksEl.children[ci];
+                        var r = sp.getBoundingClientRect();
+                        centers.push((r.left - tr.left) + r.width / 2);
+                    }}
+                }}
+                var t = years.length - 1;
+                var trLeft = 0, trRight = rect.width;
+                if (centers.length === years.length) {{
+                    trLeft = centers[0] - offsetPx + railShiftPx;
+                    trRight = centers[t] + offsetPx + railShiftPx;
+                    if (railEl) {{
+                        railEl.style.left = trLeft + "px";
+                        railEl.style.width = (trRight - trLeft) + "px";
+                        railEl.style.right = "auto";
+                    }}
+                }} else {{
+                    if (trRight <= trLeft) {{ trLeft = 0; trRight = rect.width; }}
+                }}
+                function idxToX(idx) {{
+                    if (years.length <= 1) return trLeft;
+                    if (centers.length === years.length && centers[idx] != null) return centers[idx];
+                    return trLeft + (idx / (years.length - 1)) * (trRight - trLeft);
+                }}
+                var tickMin = idxToX(mi);
+                var tickMax = idxToX(ma);
+                var leftPx = tickMin - offsetPx + railShiftPx;
+                var rightPx = tickMax + offsetPx + railShiftPx;
+                if (leftPx < trLeft) leftPx = trLeft;
+                if (rightPx > trRight) rightPx = trRight;
+                return {{ trackLeft: trLeft, trackRight: trRight, leftPx: leftPx, rightPx: rightPx }};
+            }}
+            function homeGetTickCenters() {{
+                homeTickCenters = [];
+                if (!sliderTicks || !sliderTrack || sliderTicks.children.length !== years.length) return;
+                var trackRect = sliderTrack.getBoundingClientRect();
+                for (var i = 0; i < years.length; i++) {{
+                    var span = sliderTicks.children[i];
+                    var r = span.getBoundingClientRect();
+                    homeTickCenters.push((r.left - trackRect.left) + r.width / 2);
+                }}
+            }}
+            function homeYearIndexToX(idx) {{
+                if (years.length <= 1) return trackLeft;
+                if (homeTickCenters.length === years.length && homeTickCenters[idx] != null)
+                    return homeTickCenters[idx];
+                return trackLeft + (idx / (years.length - 1)) * (trackRight - trackLeft);
+            }}
+            function homeSetHandlePositionsOnly(leftPx, rightPx) {{
+                homeSetYearHandleVisuals(handleMin, handleMax, sliderRange, leftPx, rightPx);
+            }}
+            var homeYearSliderAnimRaf = null;
+            function homeComputeHandlePxPair(mi, ma) {{
+                return homeLayoutYearSliderTrack(sliderTrack, sliderTicks, sliderRail, mi, ma);
+            }}
+            window._homeCancelYearSliderAnim = function() {{
+                if (homeYearSliderAnimRaf) {{
+                    cancelAnimationFrame(homeYearSliderAnimRaf);
+                    homeYearSliderAnimRaf = null;
+                }}
+            }};
+            window._homeAnimateYearRangeTo = function(tMin, tMax, onDone) {{
+                window._homeCancelYearSliderAnim();
+                homeUpdateSliderUI();
+                var endPair = homeComputeHandlePxPair(tMin, tMax);
+                if (!endPair) {{
+                    homeYearMinIdx = tMin;
+                    homeYearMaxIdx = tMax;
+                    homeUpdateSliderUI();
+                    if (onDone) onDone();
+                    return;
+                }}
+                var s0 = hXMinPx;
+                var s1 = hXMaxPx;
+                var e0 = endPair.leftPx;
+                var e1 = endPair.rightPx;
+                var duration = 320;
+                var startTs = performance.now();
+                function easeOutCubic(t) {{ return 1 - Math.pow(1 - t, 3); }}
+                function frame(now) {{
+                    var u = Math.min(1, (now - startTs) / duration);
+                    var k = easeOutCubic(u);
+                    var pl = s0 + (e0 - s0) * k;
+                    var pr = s1 + (e1 - s1) * k;
+                    homeSetHandlePositionsOnly(pl, pr);
+                    homeMirrorPointerFromPiePixels(pl, pr);
+                    if (u < 1) {{
+                        homeYearSliderAnimRaf = requestAnimationFrame(frame);
+                    }} else {{
+                        homeYearSliderAnimRaf = null;
+                        homeYearMinIdx = tMin;
+                        homeYearMaxIdx = tMax;
+                        homeUpdateSliderUI();
+                        if (onDone) onDone();
+                    }}
+                }}
+                homeYearSliderAnimRaf = requestAnimationFrame(frame);
+            }};
+            function homeMirrorPointerFromPiePixels(pl, pr) {{
+                var g = window._homeYearSliderGeom;
+                if (!g || !g.pointer || !pointerHandleMin) return;
+                var den = g.pie.right - g.pie.left;
+                if (den <= 0) return;
+                var f0 = (pl - g.pie.left) / den;
+                var f1 = (pr - g.pie.left) / den;
+                var qL = g.pointer.left + f0 * (g.pointer.right - g.pointer.left);
+                var qR = g.pointer.left + f1 * (g.pointer.right - g.pointer.left);
+                homeSetYearHandleVisuals(pointerHandleMin, pointerHandleMax, pointerSliderRange, qL, qR);
+                hPointerMinPx = qL;
+                hPointerMaxPx = qR;
+            }}
+            function homeMirrorPieFromPointerPixels(pl, pr) {{
+                var g = window._homeYearSliderGeom;
+                if (!g || !g.pointer || !handleMin) return;
+                var den = g.pointer.right - g.pointer.left;
+                if (den <= 0) return;
+                var f0 = (pl - g.pointer.left) / den;
+                var f1 = (pr - g.pointer.left) / den;
+                var qL = g.pie.left + f0 * (g.pie.right - g.pie.left);
+                var qR = g.pie.left + f1 * (g.pie.right - g.pie.left);
+                homeSetYearHandleVisuals(handleMin, handleMax, sliderRange, qL, qR);
+                hXMinPx = qL;
+                hXMaxPx = qR;
+            }}
+            function homeUpdateSliderUI() {{
+                var pieL = homeLayoutYearSliderTrack(sliderTrack, sliderTicks, sliderRail, homeYearMinIdx, homeYearMaxIdx);
+                if (!pieL) return;
+                homeGetTickCenters();
+                trackLeft = pieL.trackLeft;
+                trackRight = pieL.trackRight;
+                hXMinPx = pieL.leftPx;
+                hXMaxPx = pieL.rightPx;
+                homeSetHandlePositionsOnly(pieL.leftPx, pieL.rightPx);
+                var ptrL = null;
+                if (pointerSliderTrack && pointerSliderTicks) {{
+                    ptrL = homeLayoutYearSliderTrack(pointerSliderTrack, pointerSliderTicks, pointerSliderRail, homeYearMinIdx, homeYearMaxIdx);
+                    if (ptrL) {{
+                        hPointerMinPx = ptrL.leftPx;
+                        hPointerMaxPx = ptrL.rightPx;
+                        homeSetYearHandleVisuals(pointerHandleMin, pointerHandleMax, pointerSliderRange, ptrL.leftPx, ptrL.rightPx);
+                    }}
+                }}
+                window._homeYearSliderGeom = {{
+                    pie: {{ left: pieL.trackLeft, right: pieL.trackRight }},
+                    pointer: ptrL ? {{ left: ptrL.trackLeft, right: ptrL.trackRight }} : null
+                }};
+            }}
+            window._homeUpdateYearSliderUI = homeUpdateSliderUI;
+            function homeApplyYearRange() {{
+                redrawHomeRightSlide();
+            }}
+            function attachHomeHandle(handle, isMin) {{
+                if (!handle) return;
+                handle.addEventListener("mousedown", function(ev) {{
+                    ev.preventDefault();
+                    var startX = ev.clientX;
+                    var startLeftPx = isMin ? hXMinPx : hXMaxPx;
+                    function onMove(e) {{
+                        var dx = e.clientX - startX;
+                        var newPx = startLeftPx + dx;
+                        if (newPx < trackLeft) newPx = trackLeft;
+                        if (newPx > trackRight) newPx = trackRight;
+                        if (isMin) {{
+                            if (newPx > hXMaxPx - 4) newPx = hXMaxPx - 4;
+                            hXMinPx = newPx;
+                        }} else {{
+                            if (newPx < hXMinPx + 4) newPx = hXMinPx + 4;
+                            hXMaxPx = newPx;
+                        }}
+                        homeSetHandlePositionsOnly(hXMinPx, hXMaxPx);
+                        homeMirrorPointerFromPiePixels(hXMinPx, hXMaxPx);
+                    }}
+                    function onUp() {{
+                        document.removeEventListener("mousemove", onMove);
+                        document.removeEventListener("mouseup", onUp);
+                        var t = years.length - 1;
+                        if (t <= 0) return;
+                        homeGetTickCenters();
+                        if (homeTickCenters.length === years.length) {{
+                            var bestMin = 0, bestMax = t;
+                            var bestDistL = 1e9, bestDistR = 1e9;
+                            for (var i = 0; i <= t; i++) {{
+                                var targetLeft = homeTickCenters[i] - offsetPx + railShiftPx;
+                                var targetRight = homeTickCenters[i] + offsetPx + railShiftPx;
+                                if (Math.abs(targetLeft - hXMinPx) < bestDistL) {{ bestDistL = Math.abs(targetLeft - hXMinPx); bestMin = i; }}
+                                if (Math.abs(targetRight - hXMaxPx) < bestDistR) {{ bestDistR = Math.abs(targetRight - hXMaxPx); bestMax = i; }}
+                            }}
+                            homeYearMinIdx = bestMin;
+                            homeYearMaxIdx = bestMax;
+                            if (homeYearMinIdx > homeYearMaxIdx) homeYearMaxIdx = homeYearMinIdx;
+                        }} else {{
+                            var leftFrac = (hXMinPx - trackLeft) / (trackRight - trackLeft);
+                            var rightFrac = (hXMaxPx - trackLeft) / (trackRight - trackLeft);
+                            homeYearMinIdx = Math.max(0, Math.min(t, Math.round(leftFrac * t)));
+                            homeYearMaxIdx = Math.max(0, Math.min(t, Math.round(rightFrac * t)));
+                            if (homeYearMinIdx > homeYearMaxIdx) homeYearMaxIdx = homeYearMinIdx;
+                        }}
+                        homeUpdateSliderUI();
+                        homeApplyYearRange();
+                    }}
+                    document.addEventListener("mousemove", onMove);
+                    document.addEventListener("mouseup", onUp);
+                }});
+            }}
+            function attachPointerHandle(handle, isMin) {{
+                if (!handle || !pointerSliderTrack) return;
+                handle.addEventListener("mousedown", function(ev) {{
+                    ev.preventDefault();
+                    var ptrLay = homeLayoutYearSliderTrack(pointerSliderTrack, pointerSliderTicks, pointerSliderRail, homeYearMinIdx, homeYearMaxIdx);
+                    var ptrTrackLeft = ptrLay ? ptrLay.trackLeft : 0;
+                    var ptrTrackRight = ptrLay ? ptrLay.trackRight : 1;
+                    var startX = ev.clientX;
+                    var startLeftPx = isMin ? hPointerMinPx : hPointerMaxPx;
+                    function onMove(e) {{
+                        var dx = e.clientX - startX;
+                        var newPx = startLeftPx + dx;
+                        if (newPx < ptrTrackLeft) newPx = ptrTrackLeft;
+                        if (newPx > ptrTrackRight) newPx = ptrTrackRight;
+                        if (isMin) {{
+                            if (newPx > hPointerMaxPx - 4) newPx = hPointerMaxPx - 4;
+                            hPointerMinPx = newPx;
+                        }} else {{
+                            if (newPx < hPointerMinPx + 4) newPx = hPointerMinPx + 4;
+                            hPointerMaxPx = newPx;
+                        }}
+                        homeSetYearHandleVisuals(pointerHandleMin, pointerHandleMax, pointerSliderRange, hPointerMinPx, hPointerMaxPx);
+                        homeMirrorPieFromPointerPixels(hPointerMinPx, hPointerMaxPx);
+                    }}
+                    function onUp() {{
+                        document.removeEventListener("mousemove", onMove);
+                        document.removeEventListener("mouseup", onUp);
+                        var t = years.length - 1;
+                        if (t <= 0) return;
+                        var pcenters = [];
+                        if (pointerSliderTicks && pointerSliderTrack && pointerSliderTicks.children.length === years.length) {{
+                            var ptrRect = pointerSliderTrack.getBoundingClientRect();
+                            for (var pi = 0; pi < years.length; pi++) {{
+                                var sp = pointerSliderTicks.children[pi];
+                                var r = sp.getBoundingClientRect();
+                                pcenters.push((r.left - ptrRect.left) + r.width / 2);
+                            }}
+                        }}
+                        if (pcenters.length === years.length) {{
+                            var bestMin = 0, bestMax = t;
+                            var bestDistL = 1e9, bestDistR = 1e9;
+                            for (var i = 0; i <= t; i++) {{
+                                var targetLeft = pcenters[i] - offsetPx + railShiftPx;
+                                var targetRight = pcenters[i] + offsetPx + railShiftPx;
+                                if (Math.abs(targetLeft - hPointerMinPx) < bestDistL) {{ bestDistL = Math.abs(targetLeft - hPointerMinPx); bestMin = i; }}
+                                if (Math.abs(targetRight - hPointerMaxPx) < bestDistR) {{ bestDistR = Math.abs(targetRight - hPointerMaxPx); bestMax = i; }}
+                            }}
+                            homeYearMinIdx = bestMin;
+                            homeYearMaxIdx = bestMax;
+                            if (homeYearMinIdx > homeYearMaxIdx) homeYearMaxIdx = homeYearMinIdx;
+                        }} else {{
+                            var leftFrac = (hPointerMinPx - ptrTrackLeft) / Math.max(1e-6, (ptrTrackRight - ptrTrackLeft));
+                            var rightFrac = (hPointerMaxPx - ptrTrackLeft) / Math.max(1e-6, (ptrTrackRight - ptrTrackLeft));
+                            homeYearMinIdx = Math.max(0, Math.min(t, Math.round(leftFrac * t)));
+                            homeYearMaxIdx = Math.max(0, Math.min(t, Math.round(rightFrac * t)));
+                            if (homeYearMinIdx > homeYearMaxIdx) homeYearMaxIdx = homeYearMinIdx;
+                        }}
+                        homeUpdateSliderUI();
+                        homeApplyYearRange();
+                    }}
+                    document.addEventListener("mousemove", onMove);
+                    document.addEventListener("mouseup", onUp);
+                }});
+            }}
+            requestAnimationFrame(function() {{
+                var rect = sliderTrack.getBoundingClientRect();
+                trackRight = rect.width;
+                homeUpdateSliderUI();
+                attachHomeHandle(handleMin, true);
+                attachHomeHandle(handleMax, false);
+                attachPointerHandle(pointerHandleMin, true);
+                attachPointerHandle(pointerHandleMax, false);
+                redrawHomeRightSlide();
+            }});
+
+            var pieCanvas = document.getElementById("home-pie-canvas");
+            var pieTooltip = document.getElementById("home-pie-tooltip");
+            if (pieCanvas && pieTooltip && !window._homePieTooltipAttached) {{
+                window._homePieTooltipAttached = true;
+                pieCanvas.addEventListener("mousemove", function(ev) {{
+                    var sectors = window._homePieSectors;
+                    var hit = window._homePieHit;
+                    if (!sectors || !hit) {{ pieTooltip.style.display = "none"; return; }}
+                    var rect = pieCanvas.getBoundingClientRect();
+                    var logicalW = rect.width || 1;
+                    var logicalH = rect.height || 1;
+                    var mapW = (hit.width != null) ? hit.width : hit.size;
+                    var mapH = (hit.height != null) ? hit.height : hit.size;
+                    var x = (ev.clientX - rect.left) / logicalW * mapW;
+                    var y = (ev.clientY - rect.top) / logicalH * mapH;
+                    var dx = x - hit.cx;
+                    var dy = y - hit.cy;
+                    var r = Math.sqrt(dx * dx + dy * dy);
+                    if (r < hit.rInner || r > hit.rOuter) {{ pieTooltip.style.display = "none"; return; }}
+                    var angle = Math.atan2(dy, dx);
+                    if (angle < -Math.PI / 2) angle += 2 * Math.PI;
+                    var startAngle0 = -Math.PI / 2;
+                    if (angle < startAngle0) angle += 2 * Math.PI;
+                    for (var s = 0; s < sectors.length; s++) {{
+                        var seg = sectors[s];
+                        if (angle >= seg.startAngle && angle < seg.endAngle) {{
+                            var pct = (seg.frac * 100).toFixed(1);
+                            var isAmount = window._homePieMetricMode === "amount";
+                            var countStr = (seg.count && seg.count.toLocaleString) ? seg.count.toLocaleString() : seg.count;
+                            var amountStr = seg.amountUsd != null ? (seg.amountUsd / 1e9).toFixed(2) : "0.00";
+                            pieTooltip.innerHTML = isAmount
+                                ? "<strong>SDG " + (seg.sdgIndex + 1) + "</strong><br/>" + pct + "% · " + amountStr + " B USD"
+                                : "<strong>SDG " + (seg.sdgIndex + 1) + "</strong><br/>" + pct + "% · " + countStr + " projects";
+                            pieTooltip.style.display = "block";
+                            var wrapRect = pieCanvas.closest(".home-pie-wrap").getBoundingClientRect();
+                            pieTooltip.style.left = (ev.clientX - wrapRect.left + 14) + "px";
+                            pieTooltip.style.top = (ev.clientY - wrapRect.top + 10) + "px";
+                            return;
+                        }}
+                    }}
+                    pieTooltip.style.display = "none";
+                }});
+                pieCanvas.addEventListener("mouseleave", function() {{ if (pieTooltip) pieTooltip.style.display = "none"; }});
+            }}
+            var homePieBackBtn = document.getElementById("home-pie-back-btn");
+            if (homePieBackBtn && !window._homePieBackAttached) {{
+                window._homePieBackAttached = true;
+                homePieBackBtn.addEventListener("click", function() {{
+                    homeSelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    redrawHomeRightSlide();
+                    if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                }});
+            }}
+            var homePointerBackBtn = document.getElementById("home-pointer-back-btn");
+            if (homePointerBackBtn && !window._homePointerBackAttached) {{
+                window._homePointerBackAttached = true;
+                homePointerBackBtn.addEventListener("click", function() {{
+                    homeSelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    redrawHomeRightSlide();
+                    if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                }});
+            }}
+            var homeChordBackBtn = document.getElementById("home-chord-back-btn");
+            if (homeChordBackBtn && !window._homeChordBackAttached) {{
+                window._homeChordBackAttached = true;
+                homeChordBackBtn.addEventListener("click", function() {{
+                    homeSelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    redrawHomeRightSlide();
+                    if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                }});
+            }}
+            var homeScatterBackBtn = document.getElementById("home-scatter-back-btn");
+            if (homeScatterBackBtn && !window._homeScatterBackAttached) {{
+                window._homeScatterBackAttached = true;
+                homeScatterBackBtn.addEventListener("click", function() {{
+                    homeSelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    redrawHomeRightSlide();
+                    if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                }});
+            }}
+            var homeChordLayoutBtn = document.getElementById("home-chord-layout-btn");
+            if (homeChordLayoutBtn && !window._homeChordLayoutAttached) {{
+                window._homeChordLayoutAttached = true;
+                updateHomeChordLayoutButtonText();
+                homeChordLayoutBtn.addEventListener("click", function() {{
+                    homeChordLayoutMode = (homeChordLayoutMode === "coocc") ? "fixed" : "coocc";
+                    updateHomeChordLayoutButtonText();
+                    if (currentView === "home" && homeSlideIsType(homeSlideIndex, "chord")) redrawHomeRightSlide();
+                }});
+            }}
+            var homePieTrack = document.getElementById("home-pie-switch-track");
+            var homePieLabelLeft = document.getElementById("home-pie-metric-label-left");
+            var homePieLabelRight = document.getElementById("home-pie-metric-label-right");
+            if (homePieTrack && !window._homePieSwitchAttached) {{
+                window._homePieSwitchAttached = true;
+                homePieTrack.addEventListener("click", function() {{
+                    var isCount = !homePieTrack.classList.contains("on");
+                    homePieTrack.classList.toggle("on", isCount);
+                    window.homePieMetricMode = isCount ? "count" : "amount";
+                    if (homePieLabelLeft) {{ homePieLabelLeft.classList.toggle("active", isCount); homePieLabelLeft.textContent = "Project count"; }}
+                    if (homePieLabelRight) {{ homePieLabelRight.classList.toggle("active", !isCount); homePieLabelRight.textContent = "Amount (B USD)"; }}
+                    redrawHomeRightSlide();
+                }});
+            }}
+            var homePointerTrack = document.getElementById("home-pointer-switch-track");
+            var homePointerLabelLeft = document.getElementById("home-pointer-metric-label-left");
+            var homePointerLabelRight = document.getElementById("home-pointer-metric-label-right");
+            if (homePointerTrack && !window._homePointerSwitchAttached) {{
+                window._homePointerSwitchAttached = true;
+                homePointerTrack.addEventListener("click", function() {{
+                    var isCount = !homePointerTrack.classList.contains("on");
+                    homePointerTrack.classList.toggle("on", isCount);
+                    window.homePieMetricMode = isCount ? "count" : "amount";
+                    if (homePointerLabelLeft) homePointerLabelLeft.classList.toggle("active", isCount);
+                    if (homePointerLabelRight) homePointerLabelRight.classList.toggle("active", !isCount);
+                    redrawHomeRightSlide();
+                }});
+            }}
+            var pointerYearTicks = document.getElementById("home-pointer-year-ticks");
+            if (pointerYearTicks && !pointerYearTicks._yearTickDelegation) {{
+                pointerYearTicks._yearTickDelegation = true;
+                pointerYearTicks.addEventListener("click", function(ev) {{
+                    var t = ev.target;
+                    if (!t || t.tagName !== "SPAN" || !pointerYearTicks.contains(t)) return;
+                    var idx = parseInt(t.getAttribute("data-year-idx"), 10);
+                    if (!(idx >= 0)) return;
+                    ev.preventDefault();
+                    homeYearMinIdx = homeYearMaxIdx = idx;
+                    if (typeof window._homeUpdateYearSliderUI === "function") window._homeUpdateYearSliderUI();
+                    redrawHomeRightSlide();
+                    if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                }});
+            }}
+            var pointerYearLabel = document.getElementById("home-pointer-year-range-label");
+            if (pointerYearLabel && !pointerYearLabel._homePointerYearResetBound) {{
+                pointerYearLabel._homePointerYearResetBound = true;
+                pointerYearLabel.addEventListener("click", function(ev) {{
+                    ev.preventDefault();
+                    homeYearMinIdx = 0;
+                    homeYearMaxIdx = 9;
+                    if (typeof window._homeUpdateYearSliderUI === "function") window._homeUpdateYearSliderUI();
+                    redrawHomeRightSlide();
+                    if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                }});
+            }}
+        }};
+
+        function goHome() {{
+            showView("home");
+        }}
+
+        function goToMdbView(optMdbIndex) {{
+            showView("mdb");
+            homeSelectedMdbIndex = (optMdbIndex !== undefined && optMdbIndex >= 1 && window.MDB_NAMES && optMdbIndex <= window.MDB_NAMES.length) ? optMdbIndex : 0;
+            var mdbButtons = document.querySelectorAll(".sidebar .mdb-button");
+            mdbButtons.forEach(function(b, i) {{ b.classList.toggle("selected", i + 1 === homeSelectedMdbIndex); }});
+            initMdbChartOnce();
+            var backBtn = document.getElementById("chart-back-btn");
+            var applyData = function() {{
+                if (typeof window.setSdgChartData !== "function") return;
+                if (optMdbIndex !== undefined && window.MDB_TOTALS && window.MDB_NAMES) {{
+                    var n = optMdbIndex;
+                    var title = window.MDB_NAMES[n - 1] + " Operations and Their Alignment with the SDGs (2016–2025)";
+                    window.setSdgChartData(window.MDB_TOTALS[n - 1], title);
+                    if (backBtn) backBtn.classList.add("visible");
+                }} else {{
+                    window.setSdgChartData(window.SDG_TOTALS, DEFAULT_CHART_TITLE);
+                    if (backBtn) backBtn.classList.remove("visible");
+                }}
+            }};
+            setTimeout(function() {{
+                applyData();
+                if (mdbSlideIndex === 1 && typeof drawMdbCooccurrenceHeatmap === "function") drawMdbCooccurrenceHeatmap();
+                if (mdbSlideIndex === 2 && typeof window.drawMdbAmountHistogram === "function") window.drawMdbAmountHistogram();
+                if (mdbSlideIndex === 3 && typeof drawMdbChordChart === "function") drawMdbChordChart();
+            }}, 220);
+        }}
+
+        document.getElementById("nav-home").addEventListener("click", function(e) {{
+            e.preventDefault();
+            goHome();
+        }});
+        document.getElementById("nav-view-mdb").addEventListener("click", function(e) {{
+            e.preventDefault();
+            goToMdbView();
+        }});
+        document.getElementById("nav-view-country").addEventListener("click", function(e) {{
+            e.preventDefault();
+            showView("country");
+        }});
+        document.getElementById("nav-about").addEventListener("click", function(e) {{
+            e.preventDefault();
+            showView("about");
+        }});
+
+        function showNumber(n) {{
+            if (currentView === "country") {{
+                countrySelectedMdbIndex = (n >= 1 && n <= (window.MDB_TOTALS && window.MDB_TOTALS.length) ? n : 0) || 0;
+                var mdbButtons = document.querySelectorAll(".sidebar .mdb-button");
+                mdbButtons.forEach(function(b, i) {{ b.classList.toggle("selected", i + 1 === countrySelectedMdbIndex); }});
+                if (countrySlideIndex === 2) {{
+                    if (typeof window.initCountryRadarRing === "function") {{
+                        try {{
+                            window.initCountryRadarRing();
+                        }} catch (e) {{
+                            console.error("Error updating country radar chart:", e);
+                        }}
+                    }}
+                }} else if (countrySlideIndex === 3) {{
+                    if (typeof window.initCountryBarChart === "function") {{
+                        try {{
+                            window.initCountryBarChart();
+                        }} catch (e) {{
+                            console.error("Error updating country bar chart:", e);
+                        }}
+                    }}
+                }} else {{
+                    if (typeof window.initCountryMap === "function") window.initCountryMap();
+                }}
+                if (typeof syncSidebarHeight === "function") requestAnimationFrame(syncSidebarHeight);
+                return;
+            }}
+            if (currentView === "home") {{
+                homeSelectedMdbIndex = (n >= 1 && n <= (window.MDB_TOTALS && window.MDB_TOTALS.length) ? n : 0) || 0;
+                var mdbButtons = document.querySelectorAll(".sidebar .mdb-button");
+                mdbButtons.forEach(function(b, i) {{ b.classList.toggle("selected", i + 1 === homeSelectedMdbIndex); }});
+                if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+                redrawHomeRightSlide();
+                if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                if (mdbSlideIndex === 1 && typeof drawMdbCooccurrenceHeatmap === "function") drawMdbCooccurrenceHeatmap();
+                if (mdbSlideIndex === 2 && typeof window.drawMdbAmountHistogram === "function") window.drawMdbAmountHistogram();
+                if (mdbSlideIndex === 3 && typeof drawMdbChordChart === "function") drawMdbChordChart();
+                if (typeof syncSidebarHeight === "function") requestAnimationFrame(syncSidebarHeight);
+                return;
+            }}
+            if (currentView === "mdb") {{
+                homeSelectedMdbIndex = (n >= 1 && n <= (window.MDB_TOTALS && window.MDB_TOTALS.length) ? n : 0) || 0;
+                var mdbButtons = document.querySelectorAll(".sidebar .mdb-button");
+                mdbButtons.forEach(function(b, i) {{ b.classList.toggle("selected", i + 1 === homeSelectedMdbIndex); }});
+                var backBtn = document.getElementById("chart-back-btn");
+                if (mdbSlideIndex === 0) {{
+                    if (typeof window.setSdgChartData === "function" && window.MDB_TOTALS && window.MDB_NAMES) {{
+                        if (homeSelectedMdbIndex >= 1 && homeSelectedMdbIndex <= window.MDB_TOTALS.length) {{
+                            var title = window.MDB_NAMES[homeSelectedMdbIndex - 1] + " Operations and Their Alignment with the SDGs (2016–2025)";
+                            window.setSdgChartData(window.MDB_TOTALS[homeSelectedMdbIndex - 1], title);
+                            if (backBtn) backBtn.classList.add("visible");
+                        }} else {{
+                            window.setSdgChartData(window.SDG_TOTALS, DEFAULT_CHART_TITLE);
+                            if (backBtn) backBtn.classList.remove("visible");
+                        }}
+                    }}
+                }} else if (mdbSlideIndex === 1 && typeof drawMdbCooccurrenceHeatmap === "function") {{
+                    drawMdbCooccurrenceHeatmap();
+                }} else if (mdbSlideIndex === 2 && typeof window.drawMdbAmountHistogram === "function") {{
+                    window.drawMdbAmountHistogram();
+                }} else if (mdbSlideIndex === 3 && typeof drawMdbChordChart === "function") {{
+                    drawMdbChordChart();
+                }}
+                if (typeof syncSidebarHeight === "function") requestAnimationFrame(syncSidebarHeight);
+                return;
+            }}
+            if (window.MDB_TOTALS && window.MDB_NAMES && n >= 1 && n <= window.MDB_TOTALS.length) {{
+                goToMdbView(n);
+            }} else {{
+                goToMdbView();
+            }}
+        }}
+
+        window.mdbChartInited = false;
+        function initMdbChartOnce() {{
+            if (window.mdbChartInited) return;
+            window.mdbChartInited = true;
+            var iconPaths = window.SDG_ICON_PATHS;
+            var totals = window.SDG_TOTALS;
+            var colors = window.SDG_COLORS;
+
+            var container = document.querySelector(".chart-container");
+            var canvas = document.getElementById("sdg-canvas");
+            var logosContainer = document.getElementById("sdg-logos-container");
+            if (!container || !canvas || !logosContainer) return;
+
+            var ctx = canvas.getContext("2d");
+
+            var containerWidth = container.clientWidth || 1400;
+            var containerHeight = container.clientHeight || 700;
+            canvas.width = containerWidth;
+            canvas.height = containerHeight;
+
+            var sidePadding = 100;
+            var gapBetweenLogos = 4;
+            var numLogos = 17;
+            var availableWidth = containerWidth - sidePadding * 2;
+            var totalGapWidth = gapBetweenLogos * (numLogos - 1);
+            var logoSize = Math.floor((availableWidth - totalGapWidth) / numLogos);
+            if (logoSize < 12) logoSize = 12;
+
+            // 摆放 SDG logos
+            logosContainer.innerHTML = "";
+            for (var i = 0; i < numLogos; i++) {{
+                var logoDiv = document.createElement("div");
+                logoDiv.className = "sdg-logo-item";
+                var img = document.createElement("img");
+                img.src = iconPaths[i];
+                img.alt = "SDG " + (i + 1);
+                img.style.width = logoSize + "px";
+                img.style.height = logoSize + "px";
+                logoDiv.appendChild(img);
+                logosContainer.appendChild(logoDiv);
+            }}
+
+            setTimeout(function() {{
+                // 计算每个 logo 的中心位置和整体上下边界
+                var logoImages = logosContainer.querySelectorAll(".sdg-logo-item img");
+                if (logoImages.length !== numLogos) return;
+
+                var containerRect = container.getBoundingClientRect();
+                var logoCenters = [];
+                var logoTop = Infinity;
+                var logoBottom = -Infinity;
+
+                for (var i = 0; i < logoImages.length; i++) {{
+                    var r = logoImages[i].getBoundingClientRect();
+                    var cx = r.left - containerRect.left + r.width / 2;
+                    logoCenters.push(cx);
+                    logoTop = Math.min(logoTop, r.top - containerRect.top);
+                    logoBottom = Math.max(logoBottom, r.bottom - containerRect.top);
+                }}
+
+                var labels = totals.sdg_labels;
+                var baseCounts = totals.project_count_by_sdg;
+                var baseAmounts = totals.total_amount_usd_by_sdg;
+                var baseAmountB = baseAmounts.map(function(x) {{ return x / 1e9; }});
+
+                // 当前选择范围（初始为2016–2025合计）
+                var counts = baseCounts.slice();
+                var amountB = baseAmountB.slice();
+
+                var maxCount = Math.max.apply(null, baseCounts);
+                var maxAmount = Math.max.apply(null, baseAmountB);
+                if (!(maxCount > 0)) maxCount = 1;
+                if (!(maxAmount > 0)) maxAmount = 1;
+
+                // 为 5 根刻度线预留空间：轴标题远离刻度，刻度线间距略收紧
+                var axisTitleGap = 34;
+                var topChartTop = axisTitleGap;
+                var topChartBottom = logoTop - 8;
+                var bottomChartTop = logoBottom + 8;
+                var bottomChartBottom = containerHeight - axisTitleGap;
+
+                if (topChartBottom <= topChartTop + 40) topChartBottom = topChartTop + 40;
+                if (bottomChartBottom <= bottomChartTop + 40) bottomChartBottom = bottomChartTop + 40;
+
+                function niceTicks(maxVal) {{
+                    if (!(maxVal > 0)) return [0];
+                    var d = Math.floor(Math.log10(maxVal));
+                    var scale = Math.pow(10, d);
+                    var leading = Math.floor(maxVal / scale);
+                    var candidate = leading + 1;
+                    if (candidate === 5 || candidate === 9) {{
+                        candidate += 1; // 使用6或10，避免5或9这种“边缘”视觉
+                    }}
+                    var top = candidate * scale;
+                    var step = top / 4;
+                    var ticks = [];
+                    for (var i = 0; i <= 4; i++) {{
+                        ticks.push(step * i);
+                    }}
+                    return ticks;
+                }}
+
+                var countTicks = niceTicks(maxCount);
+                var amountTicks = niceTicks(maxAmount);
+                var scaleMaxCount = countTicks[4];
+                var scaleMaxAmount = amountTicks[4];
+
+                // ========== 年份滑块：2016–2025 ==========
+                var perYear = totals.per_year || null;
+                var years = [];
+                for (var y = 2016; y <= 2025; y++) {{
+                    years.push(y);
+                }}
+
+                var sliderTrack = document.getElementById("year-slider-track");
+                var sliderTicks = document.getElementById("year-slider-ticks");
+                var sliderRange = document.getElementById("year-slider-range");
+                var handleMin = document.getElementById("year-handle-min");
+                var handleMax = document.getElementById("year-handle-max");
+                var sliderRail = sliderTrack ? sliderTrack.querySelector(".year-slider-rail") : null;
+
+                var trackLeft = 0;
+                var trackRight = 0;
+                var offsetPx = 8;
+                var railShiftPx = 1; /* 微调：滑轨相对年份标签横向偏移(px)，正数右移 */
+                var yearTickCenters = [];
+                var xMinPx = 0;
+                var xMaxPx = 0;
+
+                // 渲染年份刻度
+                if (sliderTicks) {{
+                    sliderTicks.innerHTML = "";
+                    for (var i = 0; i < years.length; i++) {{
+                        var span = document.createElement("span");
+                        span.textContent = String(years[i]);
+                        span.title = "Show data for " + years[i] + " only";
+                        (function(idx) {{
+                            span.addEventListener("click", function(ev) {{
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                animateSdgYearSliderTo(idx, idx, function() {{
+                                    animStartCounts = animEndCounts.slice();
+                                    animStartAmounts = animEndAmounts.slice();
+                                    recomputeAggregates();
+                                    animEndCounts = counts.slice();
+                                    animEndAmounts = amountB.slice();
+                                    startAnimation();
+                                    var titleEl2 = document.querySelector(".chart-wrapper .chart-title");
+                                    if (titleEl2 && lastChartTitleBase)
+                                        titleEl2.textContent = lastChartTitleBase + " (" + years[minIndex] + (minIndex === maxIndex ? "" : "\u2013" + years[maxIndex]) + ")";
+                                }});
+                            }});
+                        }})(i);
+                        sliderTicks.appendChild(span);
+                    }}
+                }}
+
+                function getYearTickCenters() {{
+                    yearTickCenters = [];
+                    if (!sliderTicks || !sliderTrack || sliderTicks.children.length !== years.length) return;
+                    var trackRect = sliderTrack.getBoundingClientRect();
+                    for (var i = 0; i < years.length; i++) {{
+                        var span = sliderTicks.children[i];
+                        var r = span.getBoundingClientRect();
+                        yearTickCenters.push((r.left - trackRect.left) + r.width / 2);
+                    }}
+                }}
+
+                function yearIndexToX(idx) {{
+                    var t = years.length - 1;
+                    if (t <= 0) return trackLeft;
+                    if (yearTickCenters.length === years.length && yearTickCenters[idx] != null)
+                        return yearTickCenters[idx];
+                    return trackLeft + (idx / t) * (trackRight - trackLeft);
+                }}
+
+                var minIndex = 0;
+                var maxIndex = years.length - 1;
+                var lastChartTitleBase = "";
+                var sdgYearSliderAnimRaf = null;
+
+                function syncMdbAmountHistYearRange() {{
+                    window._mdbYearMinIdx = minIndex;
+                    window._mdbYearMaxIdx = maxIndex;
+                    if (typeof mdbSlideIndex !== "undefined" && mdbSlideIndex === 2 && typeof window.drawMdbAmountHistogram === "function")
+                        window.drawMdbAmountHistogram();
+                    if (typeof mdbSlideIndex !== "undefined" && mdbSlideIndex === 3 && typeof drawMdbChordChart === "function")
+                        drawMdbChordChart();
+                }}
+
+                function mdbHandlePxForIndices(mi, ma) {{
+                    if (!sliderTrack) return null;
+                    var trackRect = sliderTrack.getBoundingClientRect();
+                    if (trackRect.width <= 0) return null;
+                    getYearTickCenters();
+                    var t = years.length - 1;
+                    if (yearTickCenters.length === years.length) {{
+                        var tick0 = yearTickCenters[0];
+                        var tickN = yearTickCenters[t];
+                        trackLeft = tick0 - offsetPx + railShiftPx;
+                        trackRight = tickN + offsetPx + railShiftPx;
+                        if (sliderRail) {{
+                            sliderRail.style.left = trackLeft + "px";
+                            sliderRail.style.width = (trackRight - trackLeft) + "px";
+                            sliderRail.style.right = "auto";
+                        }}
+                    }} else {{
+                        if (trackRight <= trackLeft) {{ trackLeft = 0; trackRight = trackRect.width; }}
+                    }}
+                    var xMin = yearIndexToX(mi);
+                    var xMax = yearIndexToX(ma);
+                    var leftPx = xMin - offsetPx + railShiftPx;
+                    var rightPx = xMax + offsetPx + railShiftPx;
+                    if (leftPx < trackLeft) leftPx = trackLeft;
+                    if (rightPx > trackRight) rightPx = trackRight;
+                    return {{ leftPx: leftPx, rightPx: rightPx }};
+                }}
+
+                function animateSdgYearSliderTo(tMin, tMax, onDone) {{
+                    if (sdgYearSliderAnimRaf) {{
+                        cancelAnimationFrame(sdgYearSliderAnimRaf);
+                        sdgYearSliderAnimRaf = null;
+                    }}
+                    updateSliderUI();
+                    var endPair = mdbHandlePxForIndices(tMin, tMax);
+                    if (!endPair) {{
+                        minIndex = tMin;
+                        maxIndex = tMax;
+                        updateSliderUI();
+                        syncMdbAmountHistYearRange();
+                        if (onDone) onDone();
+                        return;
+                    }}
+                    var s0 = xMinPx;
+                    var s1 = xMaxPx;
+                    var e0 = endPair.leftPx;
+                    var e1 = endPair.rightPx;
+                    var duration = 320;
+                    var startTs = performance.now();
+                    function easeOutCubic(t) {{ return 1 - Math.pow(1 - t, 3); }}
+                    function frame(now) {{
+                        var u = Math.min(1, (now - startTs) / duration);
+                        var k = easeOutCubic(u);
+                        setHandlePositionsOnly(s0 + (e0 - s0) * k, s1 + (e1 - s1) * k);
+                        if (u < 1) {{
+                            sdgYearSliderAnimRaf = requestAnimationFrame(frame);
+                        }} else {{
+                            sdgYearSliderAnimRaf = null;
+                            minIndex = tMin;
+                            maxIndex = tMax;
+                            updateSliderUI();
+                            syncMdbAmountHistYearRange();
+                            if (onDone) onDone();
+                        }}
+                    }}
+                    sdgYearSliderAnimRaf = requestAnimationFrame(frame);
+                }}
+
+                function setHandlePositionsOnly(leftPx, rightPx) {{
+                    if (handleMin) handleMin.style.left = leftPx + "px";
+                    if (handleMax) handleMax.style.left = rightPx + "px";
+                    if (sliderRange) {{
+                        sliderRange.style.left = leftPx + "px";
+                        sliderRange.style.width = Math.max(0, rightPx - leftPx) + "px";
+                    }}
+                }}
+
+                function updateSliderUI() {{
+                    if (!sliderTrack) return;
+                    var trackRect = sliderTrack.getBoundingClientRect();
+                    if (trackRect.width <= 0) return;
+                    getYearTickCenters();
+                    var t = years.length - 1;
+                    if (yearTickCenters.length === years.length) {{
+                        var tick0 = yearTickCenters[0];
+                        var tickN = yearTickCenters[t];
+                        trackLeft = tick0 - offsetPx + railShiftPx;
+                        trackRight = tickN + offsetPx + railShiftPx;
+                        if (sliderRail) {{
+                            sliderRail.style.left = trackLeft + "px";
+                            sliderRail.style.width = (trackRight - trackLeft) + "px";
+                            sliderRail.style.right = "auto";
+                        }}
+                    }} else {{
+                        if (trackRight <= trackLeft) {{ trackLeft = 0; trackRight = trackRect.width; }}
+                    }}
+                    var xMin = yearIndexToX(minIndex);
+                    var xMax = yearIndexToX(maxIndex);
+                    var leftPx = xMin - offsetPx + railShiftPx;
+                    var rightPx = xMax + offsetPx + railShiftPx;
+                    if (leftPx < trackLeft) leftPx = trackLeft;
+                    if (rightPx > trackRight) rightPx = trackRight;
+                    xMinPx = leftPx;
+                    xMaxPx = rightPx;
+                    setHandlePositionsOnly(leftPx, rightPx);
+                }}
+
+                function recomputeAggregates() {{
+                    // 如果没有逐年数据，就保持原始总量
+                    if (!perYear) {{
+                        counts = baseCounts.slice();
+                        amountB = baseAmountB.slice();
+                        return;
+                    }}
+                    var aggCounts = new Array(numLogos).fill(0);
+                    var aggAmountB = new Array(numLogos).fill(0);
+
+                    for (var i = minIndex; i <= maxIndex; i++) {{
+                        var y = String(years[i]);
+                        var bucket = perYear[y];
+                        if (!bucket) continue;
+                        var yc = bucket.project_count_by_sdg || [];
+                        var ya = bucket.total_amount_usd_by_sdg || [];
+                        for (var s = 0; s < numLogos; s++) {{
+                            aggCounts[s] += yc[s] || 0;
+                            var v = ya[s] || 0;
+                            aggAmountB[s] += v / 1e9;
+                        }}
+                    }}
+                    counts = aggCounts;
+                    amountB = aggAmountB;
+                }}
+
+                updateSliderUI();
+                recomputeAggregates();
+                syncMdbAmountHistYearRange();
+                // 初始动画从0到整体累计
+                animStartCounts = new Array(numLogos).fill(0);
+                animStartAmounts = new Array(numLogos).fill(0);
+                animEndCounts = counts.slice();
+                animEndAmounts = amountB.slice();
+
+                var barWidth = logoSize - 4;
+                if (barWidth < 4) barWidth = 4;
+
+                var bars = [];
+                var hoveredBar = null;
+                var lastProgress = 0;
+
+                // 用于平滑动画的起始/目标值
+                var animStartCounts = new Array(numLogos).fill(0);
+                var animStartAmounts = new Array(numLogos).fill(0);
+                var animEndCounts = counts.slice();
+                var animEndAmounts = amountB.slice();
+
+                function drawFrame(progress) {{
+                    lastProgress = progress;
+                    ctx.clearRect(0, 0, containerWidth, containerHeight);
+
+                    // 背景
+                    ctx.fillStyle = "#fafafa";
+                    ctx.fillRect(0, 0, containerWidth, containerHeight);
+
+                    ctx.save();
+                    ctx.setLineDash([4, 4]);
+                    ctx.strokeStyle = "rgba(0,0,0,0.08)";
+
+                    // 上部虚线和刻度（项目数量）：字号与对齐与 home bar chart 一致
+                    countTicks.forEach(function(tick) {{
+                        var ratio = tick / scaleMaxCount;
+                        var y = topChartBottom - ratio * (topChartBottom - topChartTop);
+                        ctx.beginPath();
+                        ctx.moveTo(sidePadding, y);
+                        ctx.lineTo(containerWidth - sidePadding, y);
+                        ctx.stroke();
+
+                        ctx.setLineDash([]);
+                        ctx.fillStyle = "#111827";
+                        ctx.font = "600 14px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "right";
+                        ctx.textBaseline = "middle";
+                        ctx.fillText(String(tick), sidePadding - 10, y);
+                        ctx.setLineDash([4, 4]);
+                    }});
+
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = "#111827";
+                    ctx.font = "600 15px 'Segoe UI', sans-serif";
+                    ctx.textAlign = "left";
+                    ctx.textBaseline = "bottom";
+                    ctx.fillText("Number of projects", 8, topChartTop - 10);
+
+                    // 下部虚线和刻度（金额）：字号与对齐与 home bar chart 一致
+                    ctx.setLineDash([4, 4]);
+                    ctx.strokeStyle = "rgba(0,0,0,0.08)";
+
+                    amountTicks.forEach(function(tick) {{
+                        var ratio = tick / scaleMaxAmount;
+                        var y = bottomChartTop + ratio * (bottomChartBottom - bottomChartTop);
+                        ctx.beginPath();
+                        ctx.moveTo(sidePadding, y);
+                        ctx.lineTo(containerWidth - sidePadding, y);
+                        ctx.stroke();
+
+                        ctx.setLineDash([]);
+                        ctx.fillStyle = "#111827";
+                        ctx.font = "600 14px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "left";
+                        ctx.textBaseline = "middle";
+                        ctx.fillText(tick.toFixed(0) + " B", containerWidth - sidePadding + 10, y);
+                        ctx.setLineDash([4, 4]);
+                    }});
+
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = "#111827";
+                    ctx.font = "600 15px 'Segoe UI', sans-serif";
+                    ctx.textAlign = "right";
+                    ctx.textBaseline = "top";
+                    ctx.fillText("USD (in billion)", containerWidth - 8, bottomChartBottom + 10);
+
+                    // 绘制 bars（悬停时扩大 2px 并发光）
+                    bars.length = 0;
+
+                    for (var i = 0; i < numLogos; i++) {{
+                        var cx = logoCenters[i];
+                        var halfW = barWidth / 2;
+                        var leftX = cx - halfW;
+
+                        // 上方：项目数
+                        var cVal = animStartCounts[i] + (animEndCounts[i] - animStartCounts[i]) * progress;
+                        var cRatio = cVal / scaleMaxCount;
+                        var cFullH = cRatio * (topChartBottom - topChartTop);
+                        var cH = cFullH;
+                        var cY = topChartBottom - cH;
+                        var isCountHover = hoveredBar && hoveredBar.type === "count" && hoveredBar.index === i;
+                        var cL = leftX, cW = barWidth;
+                        if (isCountHover) {{ cL -= 2; cW += 4; ctx.shadowBlur = 6; ctx.shadowColor = colors[i]; }}
+                        ctx.fillStyle = colors[i];
+                        ctx.fillRect(cL, cY, cW, cH);
+                        if (isCountHover) {{ ctx.shadowBlur = 0; ctx.shadowColor = "transparent"; }}
+                        bars.push({{ type: "count", index: i, x: cL, y: cY, w: cW, h: cH, value: cVal, label: labels[i] }});
+
+                        // 下方：金额
+                        var aVal = animStartAmounts[i] + (animEndAmounts[i] - animStartAmounts[i]) * progress;
+                        var aRatio = aVal / scaleMaxAmount;
+                        var aFullH = aRatio * (bottomChartBottom - bottomChartTop);
+                        var aH = aFullH;
+                        var aY = bottomChartTop;
+                        var isAmountHover = hoveredBar && hoveredBar.type === "amount" && hoveredBar.index === i;
+                        var aL = leftX, aW = barWidth;
+                        if (isAmountHover) {{ aL -= 2; aW += 4; ctx.shadowBlur = 6; ctx.shadowColor = colors[i] + "cc"; }}
+                        ctx.fillStyle = colors[i] + "cc";
+                        ctx.fillRect(aL, aY, aW, aH);
+                        if (isAmountHover) {{ ctx.shadowBlur = 0; ctx.shadowColor = "transparent"; }}
+                        bars.push({{ type: "amount", index: i, x: aL, y: aY, w: aW, h: aH, value: aVal, label: labels[i] }});
+                    }}
+
+                    ctx.restore();
+                }}
+
+                // 动画：从 0 拉伸到完整高度
+                var startTime = null;
+                function animate(ts) {{
+                    if (!startTime) startTime = ts;
+                    var p = Math.min(1, (ts - startTime) / 800);
+                    var ease = 1 - Math.pow(1 - p, 3);
+                    drawFrame(ease);
+                    if (p < 1) requestAnimationFrame(animate);
+                }}
+
+                function startAnimation() {{
+                    startTime = null;
+                    requestAnimationFrame(animate);
+                }}
+
+                startAnimation();
+
+                window.restartSdgAnimation = function() {{
+                    startAnimation();
+                }};
+
+                // 悬停 tooltip
+                var tooltip = document.querySelector(".sdg-tooltip");
+                if (!tooltip) {{
+                    tooltip = document.createElement("div");
+                    tooltip.className = "sdg-tooltip";
+                    container.appendChild(tooltip);
+                }}
+
+                canvas.addEventListener("mousemove", function(ev) {{
+                    var rect = canvas.getBoundingClientRect();
+                    var x = ev.clientX - rect.left;
+                    var y = ev.clientY - rect.top;
+
+                    var hit = null;
+                    for (var i = 0; i < bars.length; i++) {{
+                        var b = bars[i];
+                        if (
+                            x >= b.x &&
+                            x <= b.x + b.w &&
+                            y >= b.y &&
+                            y <= b.y + b.h &&
+                            b.h > 2
+                        ) {{
+                            hit = b;
+                            break;
+                        }}
+                    }}
+
+                    if (hoveredBar !== hit) {{
+                        hoveredBar = hit;
+                        drawFrame(lastProgress);
+                    }}
+
+                    if (!hit) {{
+                        tooltip.style.display = "none";
+                        return;
+                    }}
+
+                    var text;
+                    if (hit.type === "count") {{
+                        text = hit.label + ": " + hit.value + " projects";
+                    }} else {{
+                        text = hit.label + ": " + hit.value.toFixed(2) + " B USD";
+                    }}
+
+                    tooltip.textContent = text;
+                    tooltip.style.display = "block";
+
+                    var containerRect2 = container.getBoundingClientRect();
+                    var px = x + rect.left - containerRect2.left + 12;
+                    var py = y + rect.top - containerRect2.top - 28;
+                    tooltip.style.left = px + "px";
+                    tooltip.style.top = py + "px";
+                }});
+
+                canvas.addEventListener("mouseleave", function() {{
+                    if (tooltip) tooltip.style.display = "none";
+                    if (hoveredBar) {{ hoveredBar = null; drawFrame(lastProgress); }}
+                }});
+
+                // 滑块拖动：拖动时仅更新手柄位置（跟手），松手时再按年份更新数据并动画
+                function attachHandleDrag(handle, isMin) {{
+                    if (!handle) return;
+                    handle.addEventListener("mousedown", function(ev) {{
+                        ev.preventDefault();
+                        var startX = ev.clientX;
+                        var startLeftPx = isMin ? xMinPx : xMaxPx;
+                        function onMove(e) {{
+                            var dx = e.clientX - startX;
+                            var newPx = startLeftPx + dx;
+                            if (newPx < trackLeft) newPx = trackLeft;
+                            if (newPx > trackRight) newPx = trackRight;
+                            if (isMin) {{
+                                if (newPx > xMaxPx - 4) newPx = xMaxPx - 4;
+                                xMinPx = newPx;
+                            }} else {{
+                                if (newPx < xMinPx + 4) newPx = xMinPx + 4;
+                                xMaxPx = newPx;
+                            }}
+                            setHandlePositionsOnly(xMinPx, xMaxPx);
+                        }}
+                        function onUp() {{
+                            window.removeEventListener("mousemove", onMove);
+                            window.removeEventListener("mouseup", onUp);
+                            var t = years.length - 1;
+                            if (t <= 0) return;
+                            getYearTickCenters();
+                            if (yearTickCenters.length === years.length) {{
+                                var bestMin = 0, bestMax = t;
+                                var bestDistL = 1e9, bestDistR = 1e9;
+                                for (var i = 0; i <= t; i++) {{
+                                    var targetLeft = yearTickCenters[i] - offsetPx + railShiftPx;
+                                    var targetRight = yearTickCenters[i] + offsetPx + railShiftPx;
+                                    if (Math.abs(targetLeft - xMinPx) < bestDistL) {{ bestDistL = Math.abs(targetLeft - xMinPx); bestMin = i; }}
+                                    if (Math.abs(targetRight - xMaxPx) < bestDistR) {{ bestDistR = Math.abs(targetRight - xMaxPx); bestMax = i; }}
+                                }}
+                                minIndex = bestMin;
+                                maxIndex = bestMax;
+                                if (minIndex > maxIndex) maxIndex = minIndex;
+                            }} else {{
+                                var fracMin = (xMinPx - trackLeft) / (trackRight - trackLeft);
+                                var fracMax = (xMaxPx - trackLeft) / (trackRight - trackLeft);
+                                minIndex = Math.max(0, Math.min(t, Math.round(fracMin * t)));
+                                maxIndex = Math.max(0, Math.min(t, Math.round(fracMax * t)));
+                                if (minIndex > maxIndex) maxIndex = minIndex;
+                            }}
+                            updateSliderUI();
+                            animStartCounts = animEndCounts.slice();
+                            animStartAmounts = animEndAmounts.slice();
+                            recomputeAggregates();
+                            animEndCounts = counts.slice();
+                            animEndAmounts = amountB.slice();
+                            startAnimation();
+                            var titleEl = document.querySelector(".chart-wrapper .chart-title");
+                            if (titleEl && lastChartTitleBase)
+                                titleEl.textContent = lastChartTitleBase + " (" + years[minIndex] + (minIndex === maxIndex ? "" : "\u2013" + years[maxIndex]) + ")";
+                            syncMdbAmountHistYearRange();
+                        }}
+                        window.addEventListener("mousemove", onMove);
+                        window.addEventListener("mouseup", onUp);
+                    }});
+                }}
+
+                attachHandleDrag(handleMin, true);
+                attachHandleDrag(handleMax, false);
+
+                var mdbYearRangeLabel = document.getElementById("mdb-year-range-label");
+                if (mdbYearRangeLabel && !mdbYearRangeLabel._mdbYearRangeResetBound) {{
+                    mdbYearRangeLabel._mdbYearRangeResetBound = true;
+                    mdbYearRangeLabel.addEventListener("click", function(ev) {{
+                        ev.preventDefault();
+                        animateSdgYearSliderTo(0, years.length - 1, function() {{
+                            animStartCounts = animEndCounts.slice();
+                            animStartAmounts = animEndAmounts.slice();
+                            recomputeAggregates();
+                            animEndCounts = counts.slice();
+                            animEndAmounts = amountB.slice();
+                            startAnimation();
+                            var titleEl3 = document.querySelector(".chart-wrapper .chart-title");
+                            if (titleEl3 && lastChartTitleBase)
+                                titleEl3.textContent = lastChartTitleBase + " (" + years[minIndex] + (minIndex === maxIndex ? "" : "\u2013" + years[maxIndex]) + ")";
+                        }});
+                    }});
+                }}
+
+                // 封装：切换数据源（如点击某 MDB）时只更新数据并重绘，不重建 DOM
+                window.setSdgChartData = function(newTotals, chartTitle) {{
+                    if (!newTotals) return;
+                    if (sdgYearSliderAnimRaf) {{
+                        cancelAnimationFrame(sdgYearSliderAnimRaf);
+                        sdgYearSliderAnimRaf = null;
+                    }}
+                    baseCounts = newTotals.project_count_by_sdg.slice();
+                    baseAmounts = (newTotals.total_amount_usd_by_sdg || []).slice();
+                    baseAmountB = baseAmounts.map(function(x) {{ return x / 1e9; }});
+                    perYear = newTotals.per_year || null;
+                    maxCount = Math.max.apply(null, baseCounts);
+                    maxAmount = Math.max.apply(null, baseAmountB);
+                    if (!(maxCount > 0)) maxCount = 1;
+                    if (!(maxAmount > 0)) maxAmount = 1;
+                    countTicks = niceTicks(maxCount);
+                    amountTicks = niceTicks(maxAmount);
+                    scaleMaxCount = countTicks[4];
+                    scaleMaxAmount = amountTicks[4];
+                    minIndex = 0;
+                    maxIndex = years.length - 1;
+                    updateSliderUI();
+                    animStartCounts = animEndCounts.slice();
+                    animStartAmounts = animEndAmounts.slice();
+                    recomputeAggregates();
+                    animEndCounts = counts.slice();
+                    animEndAmounts = amountB.slice();
+                    startAnimation();
+                    if (chartTitle) {{
+                        lastChartTitleBase = chartTitle.replace(/\s*\([0-9]{{4}}[^)]*[0-9]{{4}}\)\s*$/, "").trim();
+                        if (!lastChartTitleBase) lastChartTitleBase = chartTitle;
+                        var titleEl = document.querySelector(".chart-wrapper .chart-title");
+                        if (titleEl) titleEl.textContent = lastChartTitleBase + " (" + years[minIndex] + (minIndex === maxIndex ? "" : "\u2013" + years[maxIndex]) + ")";
+                    }}
+                    var backBtn = document.getElementById("chart-back-btn");
+                    if (backBtn) backBtn.classList.toggle("visible", newTotals !== window.SDG_TOTALS);
+                    var mdbButtons = document.querySelectorAll(".sidebar .mdb-button");
+                    if (newTotals === window.SDG_TOTALS) {{
+                        mdbButtons.forEach(function(b) {{ b.classList.remove("selected"); }});
+                    }} else {{
+                        var idx = window.MDB_TOTALS && window.MDB_TOTALS.indexOf ? window.MDB_TOTALS.indexOf(newTotals) + 1 : 0;
+                        if (!idx && window.MDB_TOTALS) {{
+                            for (var i = 0; i < window.MDB_TOTALS.length; i++) {{ if (window.MDB_TOTALS[i] === newTotals) {{ idx = i + 1; break; }} }}
+                        }}
+                        mdbButtons.forEach(function(b, i) {{ b.classList.toggle("selected", i + 1 === idx); }});
+                    }}
+                    syncMdbAmountHistYearRange();
+                }};
+
+                document.getElementById("chart-back-btn").addEventListener("click", function() {{
+                    if (typeof window.goToMdbView === "function") window.goToMdbView();
+                }});
+                syncSidebarHeight();
+                window.addEventListener("resize", syncSidebarHeight);
+            }}, 120);
+        }}
+
+        document.addEventListener("DOMContentLoaded", function() {{
+            showView("home");
+            if (typeof attachMdbPanelChartButtons === "function") attachMdbPanelChartButtons();
+            if (typeof setupMdbCooccurrenceAxisClicks === "function") setupMdbCooccurrenceAxisClicks();
+            var wheelEl = document.getElementById("home-sdg-wheel");
+            if (wheelEl) {{
+                wheelEl.classList.add("spin-slowdown");
+                wheelEl.addEventListener("animationend", function() {{ wheelEl.classList.remove("spin-slowdown"); }});
+                wheelEl.addEventListener("click", function() {{
+                    wheelEl.classList.remove("spin-slowdown");
+                    void wheelEl.offsetWidth;
+                    wheelEl.classList.add("spin-slowdown");
+                }});
+            }}
+            var homeBackBtn = document.getElementById("home-chart-back-btn");
+            if (homeBackBtn) {{
+                homeBackBtn.addEventListener("click", function() {{
+                    homeSelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+                }});
+            }}
+        }});
+
+        // ---------- View by Country: D3 + TopoJSON heatmap (1634×900) + dual-handle year slider ----------
+        var countryYears = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+        var countryMinIdx = 0;
+        var countryMaxIdx = countryYears.length - 1;
+        var countryMode = "count";
+        var countryMapWidth = 1400, countryMapHeight = 700;
+        var cTrackLeft = 0, cTrackRight = 0, cXMinPx = 0, cXMaxPx = 0;
+        var cOffsetPx = 8;
+        var cRailShiftPx = 1; /* 微调：滑轨相对年份标签横向偏移(px)，正数右移 */
+        var countryTickCenters = [];
+        var countryWorldData = null;
+        var countryFeatures = null;
+        var countrySelectedMdbIndex = 0;
+        var countrySelectedSdgIndex = 0;
+        var selectedCountryCode = null;
+        var pinnedTooltip = null;
+        var countrySlideIndex = 1; // -1: need-project cosine map, 0: dominant SDG color map, 1: default map, 2: radar, 3: bar
+        var mdbSlideIndex = 0;
+        var homeSlideIndex = 0;
+        var DASHBOARD_LITE = {peer_review_lite_js};
+        function homeSlidePhysical(logical) {{
+            if (DASHBOARD_LITE) {{
+                if (logical === 0) return 0;
+                if (logical === 1) return 1;
+                if (logical === 2) return 3;
+                return logical;
+            }}
+            return logical;
+        }}
+        function homeSlideMaxIndex() {{ return DASHBOARD_LITE ? 2 : 4; }}
+        function homeSliderClass(logical) {{
+            if (logical === 0) return null;
+            if (DASHBOARD_LITE) {{
+                if (logical === 1) return "slide-2";
+                if (logical === 2) return "slide-3";
+                return null;
+            }}
+            return "slide-" + (logical + 1);
+        }}
+        function homeSlideIsType(logical, type) {{
+            var p = homeSlidePhysical(logical);
+            if (type === "bar") return p === 0;
+            if (type === "pie") return p === 1;
+            if (type === "pointer") return p === 2;
+            if (type === "chord") return p === 3;
+            if (type === "scatter") return p === 4;
+            return false;
+        }}
+        var MDB_SLIDE_MAX = DASHBOARD_LITE ? 1 : 3;
+        var COUNTRY_SLIDE_MIN = DASHBOARD_LITE ? 1 : -1;
+        var homeYearMinIdx = 0;
+        var homeYearMaxIdx = 9;
+        // Pointer radar layout tuning (edit here directly; this is active code, not comment).
+        if (!window.HOME_POINTER_LAYOUT_BY_MDB || typeof window.HOME_POINTER_LAYOUT_BY_MDB !== "object") {{
+            window.HOME_POINTER_LAYOUT_BY_MDB = {{
+                default: {{ ringLayoutScale: 1, baseRadiusScale: 0.2, outerRadiusScale: 0.44, tipRadiusScale: 0.5 }}
+                // 0: {{ ... }}, // all MDBs
+                // 1: {{ ... }}, // ADB
+                // 2: {{ ... }}  // AfDB
+            }};
+        }}
+        var homeAllSdgLegendSelected = false;
+        var homeChordSelectedSdgIndex = 0; // 0 = all, 1..17 = single source SDG
+        var homeChordLayoutMode = "fixed"; // fixed | coocc
+        var mdbChordLayoutMode = "fixed"; // fixed | coocc
+        var mdbCooccSelectedCol = null;
+        var mdbCooccSelectedRow = null;
+        var mdbAmountHistChart = null;
+
+        function updateHomeChordLayoutButtonText() {{
+            var btn = document.getElementById("home-chord-layout-btn");
+            if (!btn) return;
+            btn.textContent = homeChordLayoutMode === "coocc" ? "Mode: Co-occurrence" : "Mode: Fixed order";
+        }}
+        function updateMdbChordLayoutButtonText() {{
+            var btn = document.getElementById("mdb-chord-layout-btn");
+            if (!btn) return;
+            btn.textContent = mdbChordLayoutMode === "coocc" ? "Mode: Co-occurrence" : "Mode: Fixed order";
+        }}
+
+        /** MDB-only chart chrome; must not live inside initHomePieAndSlider (that only runs when homeSlideIndex >= 1). */
+        function attachMdbPanelChartButtons() {{
+            if (window._mdbPanelChartButtonsAttached) return;
+            window._mdbPanelChartButtonsAttached = true;
+            var mdbChordBackBtn = document.getElementById("mdb-chord-back-btn");
+            if (mdbChordBackBtn) {{
+                mdbChordBackBtn.addEventListener("click", function() {{
+                    homeSelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    if (currentView === "mdb" && mdbSlideIndex === 3 && typeof drawMdbChordChart === "function") drawMdbChordChart();
+                }});
+            }}
+            var mdbChordLayoutBtn = document.getElementById("mdb-chord-layout-btn");
+            if (mdbChordLayoutBtn) {{
+                updateMdbChordLayoutButtonText();
+                mdbChordLayoutBtn.addEventListener("click", function() {{
+                    mdbChordLayoutMode = (mdbChordLayoutMode === "coocc") ? "fixed" : "coocc";
+                    updateMdbChordLayoutButtonText();
+                    if (currentView === "mdb" && mdbSlideIndex === 3 && typeof drawMdbChordChart === "function") drawMdbChordChart();
+                }});
+            }}
+            var mdbAmountBackBtn = document.getElementById("mdb-amount-back-btn");
+            if (mdbAmountBackBtn) {{
+                mdbAmountBackBtn.addEventListener("click", function() {{
+                    homeSelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    if (currentView === "mdb" && mdbSlideIndex === 2 && typeof window.drawMdbAmountHistogram === "function")
+                        window.drawMdbAmountHistogram();
+                }});
+            }}
+        }}
+
+        function syncHomeChordLegendSelection() {{
+            document.querySelectorAll(".home-sdg-legend-item").forEach(function(el) {{
+                var idx = Number(el.getAttribute("data-sdg-index")) || 0;
+                var on = homeSlideIsType(homeSlideIndex, "chord") && (idx === homeChordSelectedSdgIndex);
+                el.classList.toggle("chord-selected", on);
+            }});
+        }}
+
+        function redrawHomeRightSlide() {{
+            syncHomeChordLegendSelection();
+            if (homeSlideIsType(homeSlideIndex, "pie") && typeof drawHomePieChart === "function") drawHomePieChart();
+            if (homeSlideIsType(homeSlideIndex, "pointer") && typeof drawHomePointerChart === "function") drawHomePointerChart();
+            if (homeSlideIsType(homeSlideIndex, "chord") && typeof drawHomeChordChart === "function") drawHomeChordChart();
+            if (homeSlideIsType(homeSlideIndex, "scatter") && typeof drawHomeScatterChart === "function") drawHomeScatterChart();
+        }}
+
+        (function setupHomeYearSliderClickExtras() {{
+            var tickHost = document.getElementById("home-year-slider-ticks");
+            if (tickHost && !tickHost._yearTickDelegation) {{
+                tickHost._yearTickDelegation = true;
+                tickHost.addEventListener("click", function(ev) {{
+                    var t = ev.target;
+                    if (!t || t.tagName !== "SPAN" || !tickHost.contains(t)) return;
+                    var spans = tickHost.children;
+                    var idx = -1;
+                    for (var si = 0; si < spans.length; si++) {{
+                        if (spans[si] === t) {{ idx = si; break; }}
+                    }}
+                    if (idx < 0) return;
+                    ev.preventDefault();
+                    if (typeof window._homeAnimateYearRangeTo === "function") {{
+                        window._homeAnimateYearRangeTo(idx, idx, function() {{
+                            redrawHomeRightSlide();
+                            if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                        }});
+                    }} else {{
+                        homeYearMinIdx = homeYearMaxIdx = idx;
+                        if (typeof window._homeUpdateYearSliderUI === "function") window._homeUpdateYearSliderUI();
+                        redrawHomeRightSlide();
+                        if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                    }}
+                }});
+            }}
+            var homeL = document.getElementById("home-year-range-label");
+            if (homeL && !homeL._homeYearRangeResetBound) {{
+                homeL._homeYearRangeResetBound = true;
+                homeL.addEventListener("click", function(ev) {{
+                    ev.preventDefault();
+                    if (typeof window._homeAnimateYearRangeTo === "function") {{
+                        window._homeAnimateYearRangeTo(0, 9, function() {{
+                            redrawHomeRightSlide();
+                            if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                        }});
+                    }} else {{
+                        homeYearMinIdx = 0;
+                        homeYearMaxIdx = 9;
+                        if (typeof window._homeUpdateYearSliderUI === "function") window._homeUpdateYearSliderUI();
+                        redrawHomeRightSlide();
+                        if (typeof updateHomeTotalsForYearRange === "function") updateHomeTotalsForYearRange();
+                    }}
+                }});
+            }}
+        }})();
+
+        function drawMdbCooccurrenceHeatmap() {{
+            var canvas = document.getElementById("mdb-cooccurrence-canvas");
+            var tooltipEl = document.getElementById("mdb-cooccurrence-tooltip");
+            var fixedTooltipEl = document.getElementById("mdb-cooccurrence-fixed-tooltip");
+            var detailInfoEl = document.getElementById("mdb-coocc-detail-info");
+            var raw = window.SDG_COOCCURRENCE;
+            var mdbIndex = (typeof homeSelectedMdbIndex !== "undefined" ? homeSelectedMdbIndex : 0);
+            var data = (raw && raw.by_mdb && raw.by_mdb[mdbIndex]) ? raw.by_mdb[mdbIndex] : raw;
+            var colors = window.SDG_COLORS;
+            if (!canvas || !data || !data.conditional_probability || !colors || colors.length < 17) return;
+            var titleEl = document.querySelector(".mdb-slide-2 .chart-title");
+            if (titleEl && window.MDB_NAMES) {{
+                if (mdbIndex >= 1 && mdbIndex <= window.MDB_NAMES.length)
+                    titleEl.textContent = window.MDB_NAMES[mdbIndex - 1] + " Operations' SDG Co-occurrence: Conditional Probability (2016–2025)";
+                else
+                    titleEl.textContent = "MDB Operations' SDG Co-occurrence: Conditional Probability (2016–2025)";
+            }}
+            var backBtn = document.getElementById("mdb-coocc-back-all");
+            if (backBtn) backBtn.classList.toggle("visible", (mdbIndex >= 1 && window.MDB_NAMES && mdbIndex <= window.MDB_NAMES.length));
+            var wrap = canvas.closest(".mdb-square-plot-wrap");
+            if (!wrap) return;
+            var PLOT_PAD = 12;
+            var CELL = 48;
+            var GAP = 2;
+            var STEP = CELL + GAP;
+            var startX = PLOT_PAD;
+            var startY = PLOT_PAD;
+            var halfCell = CELL / 2;
+            var plotSize = 872;  /* 调整右边距：最后一列右边缘 = 12 + 16*50 + 48 = 860，右边距 = 872 - 860 = 12px，与左边距一致 */
+            var plotScale = 1;
+            var dpr = window.devicePixelRatio || 1;
+            canvas.width = plotSize * dpr;
+            canvas.height = plotSize * dpr;
+            canvas.style.width = plotSize + "px";
+            canvas.style.height = plotSize + "px";
+            var ctx = canvas.getContext("2d");
+            ctx.scale(dpr, dpr);
+            var cond = data.conditional_probability;
+            var coocc = data.cooccurrence || null;
+            var n = 17;
+            function grayColor(t) {{
+                if (t <= 0) return "#E8E8EC";
+                if (t >= 1) return "#2F2F35";
+                var r, g, b;
+                if (t <= 0.5) {{
+                    var u = t * 2;
+                    r = Math.round(0xE8 + (0x8A - 0xE8) * u);
+                    g = Math.round(0xE8 + (0x8A - 0xE8) * u);
+                    b = Math.round(0xEC + (0x8A - 0xEC) * u);
+                }} else {{
+                    var u = (t - 0.5) * 2;
+                    r = Math.round(0x8A + (0x2F - 0x8A) * u);
+                    g = Math.round(0x8A + (0x2F - 0x8A) * u);
+                    b = Math.round(0x8A + (0x35 - 0x8A) * u);
+                }}
+                return "rgb(" + r + "," + g + "," + b + ")";
+            }}
+            var selCol = mdbCooccSelectedCol;
+            var selRow = mdbCooccSelectedRow;
+            var sdgCounts = data.sdg_counts || [];
+            function cellHighlight(i, j) {{ return (i !== j) && ((selCol === j) || (selRow === i)); }}
+            for (var i = 0; i < n; i++) {{
+                for (var j = 0; j < n; j++) {{
+                    if (cellHighlight(i, j)) continue;
+                    var x = startX + j * STEP;
+                    var y = startY + i * STEP;
+                    var isDiag = (i === j);
+                    if (isDiag) {{
+                        ctx.fillStyle = colors[i] || "#94a3b8";
+                    }} else {{
+                        var v = cond[i] && typeof cond[i][j] === "number" ? cond[i][j] : 0;
+                        ctx.fillStyle = grayColor(v);
+                    }}
+                    ctx.fillRect(x, y, CELL, CELL);
+                    if (!isDiag) {{
+                        var v = cond[i] && typeof cond[i][j] === "number" ? cond[i][j] : 0;
+                        ctx.fillStyle = v >= 0.5 ? "#fff" : "#374151";
+                        ctx.font = "700 14px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "center";
+                        ctx.textBaseline = "middle";
+                        ctx.fillText(v.toFixed(2), x + CELL / 2, y + CELL / 2);
+                    }}
+                }}
+            }}
+            ctx.shadowBlur = 4;
+            for (var i = 0; i < n; i++) {{
+                for (var j = 0; j < n; j++) {{
+                    if (!cellHighlight(i, j)) continue;
+                    var x = startX + j * STEP;
+                    var y = startY + i * STEP;
+                    ctx.shadowColor = selCol === j ? (colors[j] || "#64748b") : (colors[i] || "#64748b");
+                    ctx.fillStyle = (i === j) ? (colors[i] || "#94a3b8") : grayColor(cond[i] && cond[i][j] !== undefined ? cond[i][j] : 0);
+                    ctx.fillRect(x - 1, y - 1, CELL + 2, CELL + 2);
+                    if (i !== j) {{
+                        var v = cond[i] && typeof cond[i][j] === "number" ? cond[i][j] : 0;
+                        ctx.shadowBlur = 0;
+                        ctx.shadowColor = "transparent";
+                        ctx.fillStyle = v >= 0.5 ? "#fff" : "#374151";
+                        ctx.font = "700 14px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "center";
+                        ctx.textBaseline = "middle";
+                        ctx.fillText(v.toFixed(2), x + CELL / 2, y + CELL / 2);
+                        ctx.shadowBlur = 4;
+                    }}
+                }}
+            }}
+            ctx.shadowBlur = 0;
+            ctx.shadowColor = "transparent";
+            if (tooltipEl) tooltipEl.classList.remove("visible");
+            if (fixedTooltipEl) {{
+                fixedTooltipEl.innerHTML = "";
+                fixedTooltipEl.classList.remove("visible");
+                fixedTooltipEl.style.left = "";
+                fixedTooltipEl.style.right = "";
+                fixedTooltipEl.style.top = "";
+                fixedTooltipEl.style.bottom = "";
+                fixedTooltipEl.style.transform = "";
+            }}
+            if (detailInfoEl) {{
+                if (selCol !== null && selCol !== undefined) {{
+                    var list = [];
+                    for (var i = 0; i < n; i++) {{
+                        if (i === selCol) continue;
+                        var p = cond[i] && typeof cond[i][selCol] === "number" ? cond[i][selCol] : 0;
+                        var a = coocc && coocc[i] && typeof coocc[i][selCol] === "number" ? coocc[i][selCol] : 0;
+                        var b = sdgCounts[i] != null ? sdgCounts[i] : 0;
+                        list.push({{ i: i, p: p, a: a, b: b }});
+                    }}
+                    list.sort(function(a, b) {{ return b.p - a.p; }});
+                    var lines = ["Proportion of projects also tagged with SDG " + (selCol + 1) + ", by row SDG (high to low):"];
+                    list.forEach(function(o) {{ lines.push("SDG " + (o.i + 1) + ": " + (o.p * 100).toFixed(1) + "% (" + (o.a || 0).toLocaleString() + "/" + (o.b || 0).toLocaleString() + " projects)"); }});
+                    detailInfoEl.innerHTML = lines.join("<br>");
+                    detailInfoEl.classList.add("visible");
+                }} else if (selRow !== null && selRow !== undefined) {{
+                    var rowTotal = sdgCounts[selRow] != null ? sdgCounts[selRow] : 0;
+                    var list = [];
+                    for (var j = 0; j < n; j++) {{
+                        if (j === selRow) continue;
+                        var p = cond[selRow] && typeof cond[selRow][j] === "number" ? cond[selRow][j] : 0;
+                        var m = coocc && coocc[selRow] && typeof coocc[selRow][j] === "number" ? coocc[selRow][j] : 0;
+                        list.push({{ j: j, p: p, m: m }});
+                    }}
+                    list.sort(function(a, b) {{ return b.p - a.p; }});
+                    var lines = ["In SDG " + (selRow + 1) + " (" + (rowTotal || 0).toLocaleString() + " projects), proportion also tagged with other SDGs (high to low):"];
+                    list.forEach(function(o) {{ lines.push("SDG " + (o.j + 1) + ": " + (o.p * 100).toFixed(1) + "% (" + (o.m || 0).toLocaleString() + " projects)"); }});
+                    detailInfoEl.innerHTML = lines.join("<br>");
+                    detailInfoEl.classList.add("visible");
+                }} else {{
+                    detailInfoEl.innerHTML = "";
+                    detailInfoEl.classList.remove("visible");
+                }}
+            }}
+            if (tooltipEl) {{
+                canvas.removeEventListener("mousemove", canvas._mdbCooccMove);
+                canvas.removeEventListener("mouseleave", canvas._mdbCooccLeave);
+                function showTip(ev) {{
+                    if (selCol !== null || selRow !== null) {{ tooltipEl.classList.remove("visible"); return; }}
+                    var rect = canvas.getBoundingClientRect();
+                    var displayX = ev.clientX - rect.left;
+                    var displayY = ev.clientY - rect.top;
+                    var logicalX = displayX / plotScale;
+                    var logicalY = displayY / plotScale;
+                    var j = Math.floor((logicalX - startX) / STEP);
+                    var i = Math.floor((logicalY - startY) / STEP);
+                    if (i < 0 || i >= n || j < 0 || j >= n) {{ tooltipEl.classList.remove("visible"); return; }}
+                    var si = i + 1, sj = j + 1;
+                    var p = (cond[i] && typeof cond[i][j] === "number") ? cond[i][j] : 0;
+                    var text = "P(SDG " + sj + " | SDG " + si + ") = " + (p * 100).toFixed(1) + "%";
+                    if (coocc && coocc[i] && typeof coocc[i][j] === "number")
+                        text += " · " + coocc[i][j].toLocaleString() + " projects";
+                    tooltipEl.textContent = text;
+                    var area = canvas.closest(".mdb-square-plot-area");
+                    var areaRect = area ? area.getBoundingClientRect() : rect;
+                    var tx = ev.clientX - areaRect.left + 12;
+                    var ty = ev.clientY - areaRect.top + 12;
+                    tooltipEl.style.left = Math.min(tx, areaRect.width - 180) + "px";
+                    tooltipEl.style.top = Math.min(ty, areaRect.height - 60) + "px";
+                    tooltipEl.classList.add("visible");
+                }}
+                function hideTip() {{ if (tooltipEl) tooltipEl.classList.remove("visible"); }}
+                canvas._mdbCooccMove = showTip;
+                canvas._mdbCooccLeave = hideTip;
+                canvas.addEventListener("mousemove", showTip);
+                canvas.addEventListener("mouseleave", hideTip);
+            }}
+        }}
+
+        window.drawMdbAmountHistogram = function() {{
+            var raw = window.MDB_AMOUNT_HISTOGRAM;
+            var canvas = document.getElementById("mdb-amount-hist-canvas");
+            if (!raw || !canvas || typeof Chart === "undefined") return;
+            var projects = raw.projects || [];
+            var mdbIdx = (typeof homeSelectedMdbIndex !== "undefined" ? homeSelectedMdbIndex : 0) || 0;
+            var yMinIdx = window._mdbYearMinIdx;
+            var yMaxIdx = window._mdbYearMaxIdx;
+            if (yMinIdx == null || yMinIdx === undefined) yMinIdx = 0;
+            if (yMaxIdx == null || yMaxIdx === undefined) yMaxIdx = 9;
+            var yLo = 2016 + yMinIdx;
+            var yHi = 2016 + yMaxIdx;
+            var filtered = [];
+            var pi, row, yr, org, amt;
+            for (pi = 0; pi < projects.length; pi++) {{
+                row = projects[pi];
+                if (!row) continue;
+                if (Array.isArray(row)) {{
+                    yr = row[0];
+                    org = row[1];
+                    amt = row[2];
+                }} else {{
+                    yr = row.year;
+                    org = row.mdb_sidebar_index;
+                    amt = row.amount_usd;
+                }}
+                if (yr < yLo || yr > yHi) continue;
+                if (mdbIdx >= 1 && Math.round(org) !== mdbIdx) continue;
+                if (!(amt >= 0)) continue;
+                filtered.push(Number(amt));
+            }}
+            var counts = new Array(21).fill(0); // 20 bins (50M each) + overflow >1B
+            var labels = [];
+            for (pi = 0; pi < 20; pi++) labels.push((pi * 50) + "–" + ((pi + 1) * 50) + "M");
+            labels.push(">1B");
+            var BIN = 50000000;
+            for (pi = 0; pi < filtered.length; pi++) {{
+                amt = filtered[pi];
+                if (amt >= 1000000000) counts[20] += 1;
+                else {{
+                    var b = Math.floor(amt / BIN);
+                    if (b < 0) b = 0;
+                    if (b > 19) b = 19;
+                    counts[b] += 1;
+                }}
+            }}
+            var titleEl = document.getElementById("mdb-amount-hist-title");
+            var backBtn = document.getElementById("mdb-amount-back-btn");
+            if (titleEl && window.MDB_NAMES) {{
+                var yTxt = yLo === yHi ? String(yLo) : (yLo + "\u2013" + yHi);
+                if (mdbIdx >= 1 && mdbIdx <= window.MDB_NAMES.length)
+                    titleEl.textContent = window.MDB_NAMES[mdbIdx - 1] + " project amount distribution (50M bins + >1B, " + yTxt + ")";
+                else
+                    titleEl.textContent = "All MDB project amount distribution (50M bins + >1B, " + yTxt + ")";
+            }}
+            if (backBtn) backBtn.classList.toggle("visible", mdbIdx > 0);
+            if (mdbAmountHistChart) {{
+                mdbAmountHistChart.destroy();
+                mdbAmountHistChart = null;
+            }}
+            var ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            mdbAmountHistChart = new Chart(ctx, {{
+                type: "bar",
+                data: {{
+                    labels: labels,
+                    datasets: [{{
+                        label: "Project count",
+                        data: counts,
+                        backgroundColor: "rgba(55, 65, 81, 0.72)",
+                        borderColor: "rgba(31, 41, 55, 0.9)",
+                        borderWidth: 1
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {{
+                        legend: {{ display: false }},
+                        title: {{ display: false }}
+                    }},
+                    scales: {{
+                        x: {{
+                            title: {{ display: true, text: "Project amount range (USD)", font: {{ size: 24, weight: "800" }} }},
+                            ticks: {{
+                                autoSkip: true,
+                                maxRotation: 45,
+                                minRotation: 0,
+                                font: {{ size: 14, weight: "700" }}
+                            }}
+                        }},
+                        y: {{
+                            title: {{ display: true, text: "Number of projects", font: {{ size: 24, weight: "800" }} }},
+                            beginAtZero: true,
+                            ticks: {{ precision: 0, font: {{ size: 14, weight: "700" }} }}
+                        }}
+                    }}
+                }}
+            }});
+        }};
+
+        function updateMdbArrows() {{
+            var right = document.getElementById("mdb-arrow-right");
+            var left = document.getElementById("mdb-arrow-left");
+            var slider = document.getElementById("mdb-slider");
+            if (right) right.classList.toggle("visible", mdbSlideIndex < MDB_SLIDE_MAX);
+            if (left) left.classList.toggle("visible", mdbSlideIndex > 0);
+            if (slider) {{
+                slider.classList.remove("mdb-slide-pos-0", "mdb-slide-pos-1", "mdb-slide-pos-2", "mdb-slide-pos-3");
+                slider.classList.add("mdb-slide-pos-" + mdbSlideIndex);
+            }}
+            if (mdbSlideIndex === 1) {{
+                requestAnimationFrame(function() {{ if (typeof drawMdbCooccurrenceHeatmap === "function") drawMdbCooccurrenceHeatmap(); }});
+            }}
+            if (mdbSlideIndex === 2) {{
+                requestAnimationFrame(function() {{ if (typeof window.drawMdbAmountHistogram === "function") window.drawMdbAmountHistogram(); }});
+            }}
+            if (mdbSlideIndex === 3) {{
+                requestAnimationFrame(function() {{ if (typeof drawMdbChordChart === "function") drawMdbChordChart(); }});
+            }}
+        }}
+
+        function updateHomeArrows() {{
+            var right = document.getElementById("home-arrow-right");
+            var left = document.getElementById("home-arrow-left");
+            var slider = document.getElementById("home-slider");
+            if (right) right.classList.toggle("visible", homeSlideIndex < homeSlideMaxIndex());
+            if (left) left.classList.toggle("visible", homeSlideIndex > 0);
+            if (slider) {{
+                slider.classList.remove("slide-2", "slide-3", "slide-4", "slide-5");
+                var slideClass = homeSliderClass(homeSlideIndex);
+                if (slideClass) slider.classList.add(slideClass);
+            }}
+            if (homeSlideIndex >= 1) {{
+                requestAnimationFrame(function() {{
+                    if (typeof window.initHomePieAndSlider === "function") window.initHomePieAndSlider();
+                    requestAnimationFrame(function() {{
+                        syncHomeChordLegendSelection();
+                        if (typeof window._homeUpdateYearSliderUI === "function") window._homeUpdateYearSliderUI();
+                        redrawHomeRightSlide();
+                    }});
+                }});
+            }}
+        }}
+
+        function setupMdbCooccurrenceAxisClicks() {{
+            var slide2 = document.querySelector(".mdb-slide-2");
+            if (!slide2) return;
+            var colors = window.SDG_COLORS || [];
+            var yList = slide2.querySelector(".mdb-axis-y-list");
+            var xList = slide2.querySelector(".mdb-axis-x-list");
+            function applyHighlight(el, on, color) {{
+                if (!el) return;
+                el.classList.toggle("highlight", !!on);
+                el.style.boxShadow = on && color ? "0 0 6px " + color : "";
+            }}
+            function clearAllHighlights() {{
+                slide2.querySelectorAll(".mdb-axis-y-item").forEach(function(el) {{ applyHighlight(el, false); }});
+                slide2.querySelectorAll(".mdb-axis-x-item").forEach(function(el) {{ applyHighlight(el, false); }});
+            }}
+            function selectRow(index) {{
+                if (mdbCooccSelectedRow === index) {{ mdbCooccSelectedRow = null; mdbCooccSelectedCol = null; }}
+                else {{ mdbCooccSelectedRow = index; mdbCooccSelectedCol = null; }}
+                clearAllHighlights();
+                if (mdbCooccSelectedRow !== null) {{
+                    var el = yList && yList.children[mdbCooccSelectedRow];
+                    applyHighlight(el, true, colors[mdbCooccSelectedRow] || "#64748b");
+                }}
+                drawMdbCooccurrenceHeatmap();
+            }}
+            function selectCol(index) {{
+                if (mdbCooccSelectedCol === index) {{ mdbCooccSelectedCol = null; mdbCooccSelectedRow = null; }}
+                else {{ mdbCooccSelectedCol = index; mdbCooccSelectedRow = null; }}
+                clearAllHighlights();
+                if (mdbCooccSelectedCol !== null) {{
+                    var el = xList && xList.children[mdbCooccSelectedCol];
+                    applyHighlight(el, true, colors[mdbCooccSelectedCol] || "#64748b");
+                }}
+                drawMdbCooccurrenceHeatmap();
+            }}
+            function clearSelection() {{
+                mdbCooccSelectedRow = null;
+                mdbCooccSelectedCol = null;
+                clearAllHighlights();
+                var detailEl = document.getElementById("mdb-coocc-detail-info");
+                if (detailEl) detailEl.classList.remove("visible");
+                drawMdbCooccurrenceHeatmap();
+            }}
+            if (yList) yList.querySelectorAll(".mdb-axis-y-item").forEach(function(el, i) {{
+                el.addEventListener("click", function() {{ selectRow(i); }});
+            }});
+            if (xList) xList.querySelectorAll(".mdb-axis-x-item").forEach(function(el, i) {{
+                el.addEventListener("click", function() {{ selectCol(i); }});
+            }});
+            var globalLogo = document.getElementById("mdb-coocc-global-logo");
+            if (globalLogo) globalLogo.addEventListener("click", clearSelection);
+            var backAllBtn = document.getElementById("mdb-coocc-back-all");
+            if (backAllBtn) {{
+                backAllBtn.addEventListener("click", function() {{
+                    homeSelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    if (typeof drawMdbCooccurrenceHeatmap === "function") drawMdbCooccurrenceHeatmap();
+                }});
+            }}
+        }}
+
+        function updateCountryArrows() {{
+            if (DASHBOARD_LITE && countrySlideIndex < COUNTRY_SLIDE_MIN) countrySlideIndex = 1;
+            var right = document.getElementById("country-arrow-right");
+            var left = document.getElementById("country-arrow-left");
+            var leftZero = document.getElementById("country-arrow-left-zero");
+            var slider = document.getElementById("country-map-slider");
+            if (right) right.classList.toggle("visible", (countrySlideIndex === -1 || countrySlideIndex === 0 || countrySlideIndex === 1) ? !!selectedCountryCode : countrySlideIndex === 2);
+            if (left) left.classList.toggle("visible", countrySlideIndex >= 2);
+            if (leftZero) leftZero.classList.toggle("visible", !DASHBOARD_LITE && (countrySlideIndex === 1 || countrySlideIndex === 0));
+            if (slider) {{
+                slider.classList.remove("detail-view", "slide-2", "slide-3");
+                if (countrySlideIndex === 2) slider.classList.add("slide-2");
+                else if (countrySlideIndex === 3) slider.classList.add("slide-3");
+            }}
+            /* 切换至 country-slide-2 时立即设置 radar 标题，避免首次滑入时闪现占位文案 */
+            if (countrySlideIndex === 2) {{
+                var titleEl = document.querySelector(".country-radar-chart-title .chart-title");
+                if (titleEl) {{
+                    var countryName = (window.COUNTRY_NAMES && selectedCountryCode && window.COUNTRY_NAMES[selectedCountryCode]) ? window.COUNTRY_NAMES[selectedCountryCode] : (selectedCountryCode || "Selected Country");
+                    var titleText = "MDB Operations in " + countryName + " (2016-2025)";
+                    if (countrySelectedMdbIndex > 0 && window.MDB_NAMES && window.MDB_NAMES[countrySelectedMdbIndex - 1])
+                        titleText = window.MDB_NAMES[countrySelectedMdbIndex - 1] + " Operations in " + countryName + " (2016-2025)";
+                    titleEl.textContent = titleText;
+                }}
+            }}
+        }}
+        function syncRadarSwitchFromMap() {{
+            var radarSwitchWrap = document.getElementById("radar-metric-switch");
+            var radarTrackEl = document.getElementById("radar-switch-track");
+            var radarLabelLeft = document.getElementById("radar-metric-label-left");
+            var radarLabelRight = document.getElementById("radar-metric-label-right");
+            var trackEl = document.getElementById("map-switch-track");
+            if (radarTrackEl && trackEl) {{
+                var isCount = countryMode === "count";
+                radarTrackEl.classList.toggle("on", isCount);
+                if (radarSwitchWrap) radarSwitchWrap.setAttribute("aria-checked", isCount ? "true" : "false");
+                if (radarLabelLeft) {{ radarLabelLeft.classList.toggle("active", isCount); radarLabelLeft.textContent = "Project count"; }}
+                if (radarLabelRight) {{ radarLabelRight.classList.toggle("active", !isCount); radarLabelRight.textContent = "Amount (B USD)"; }}
+            }}
+        }}
+        function syncMapSwitchFromRadar() {{
+            var radarTrackEl = document.getElementById("radar-switch-track");
+            var trackEl = document.getElementById("map-switch-track");
+            var switchWrap = document.getElementById("map-metric-switch");
+            var labelLeft = document.getElementById("map-metric-label-left");
+            var labelRight = document.getElementById("map-metric-label-right");
+            if (trackEl && radarTrackEl) {{
+                var isCount = radarTrackEl.classList.contains("on");
+                countryMode = isCount ? "count" : "amount";
+                trackEl.classList.toggle("on", isCount);
+                if (switchWrap) switchWrap.setAttribute("aria-checked", isCount ? "true" : "false");
+                if (labelLeft) {{ labelLeft.classList.toggle("active", isCount); labelLeft.textContent = "Project count"; }}
+                if (labelRight) {{ labelRight.classList.toggle("active", !isCount); labelRight.textContent = "Amount (B USD)"; }}
+            }}
+        }}
+
+        function getCountryByCountry(data, mdbIndex) {{
+            if (!data) return null;
+            if (mdbIndex && data.by_mdb && data.by_mdb[mdbIndex - 1]) return data.by_mdb[mdbIndex - 1].by_country || null;
+            return data.by_country || null;
+        }}
+
+        function getCountryRecord(c) {{
+            if (!c) return null;
+            if (countrySelectedSdgIndex >= 1 && countrySelectedSdgIndex <= 17 && c.per_sdg && c.per_sdg[countrySelectedSdgIndex - 1])
+                return c.per_sdg[countrySelectedSdgIndex - 1];
+            return c;
+        }}
+
+        function parseSdgIndexScore(raw) {{
+            if (raw == null || raw === "") return null;
+            var v = Number(raw);
+            if (!isFinite(v)) return null;
+            return v;
+        }}
+
+        function formatNeedProjectCosine(v) {{
+            if (v == null || !isFinite(v) || v <= 0) return "N/A";
+            return v.toFixed(4);
+        }}
+
+        function getCountryNeedProjectCosine(code, minIdx, maxIdx) {{
+            var data = window.COUNTRY_TOTALS;
+            var byCountry = getCountryByCountry(data, countrySelectedMdbIndex);
+            if (!byCountry || !byCountry[code] || !byCountry[code].per_sdg) return null;
+            var perSdg = byCountry[code].per_sdg;
+            var projectVec = [];
+            for (var s = 0; s < 17; s++) {{
+                var rec = perSdg[s];
+                if (!rec) {{ projectVec.push(0); continue; }}
+                if (minIdx === 0 && maxIdx === countryYears.length - 1) {{
+                    projectVec.push(rec.total_project_count || 0);
+                }} else {{
+                    var py = rec.per_year || {{}};
+                    var c = 0;
+                    for (var i = minIdx; i <= maxIdx; i++) {{
+                        var y = String(countryYears[i]);
+                        var b = py[y];
+                        if (b) c += b.project_count || 0;
+                    }}
+                    projectVec.push(c);
+                }}
+            }}
+            var idxData = (window.SDG_INDEX && window.SDG_INDEX.countries) ? window.SDG_INDEX.countries[code] : null;
+            var yearsData = idxData && idxData.years ? idxData.years : [];
+            var sums = new Array(17).fill(0);
+            var counts = new Array(17).fill(0);
+            for (var yi = 0; yi < yearsData.length; yi++) {{
+                var row = yearsData[yi];
+                if (!row || row.year == null) continue;
+                var yNum = Number(row.year);
+                if (!isFinite(yNum)) continue;
+                if (yNum < countryYears[minIdx] || yNum > countryYears[maxIdx]) continue;
+                var ss = row.sdg_scores || {{}};
+                for (var s = 0; s < 17; s++) {{
+                    var v = parseSdgIndexScore(ss["SDG" + (s + 1)]);
+                    if (v == null) continue;
+                    sums[s] += v;
+                    counts[s] += 1;
+                }}
+            }}
+            var demandVec = [];
+            for (var s = 0; s < 17; s++) {{
+                if (counts[s] > 0) demandVec.push(Math.max(0, 100 - (sums[s] / counts[s])));
+                else demandVec.push(0);
+            }}
+            function normalize(v) {{
+                var norm = 0;
+                for (var i = 0; i < v.length; i++) norm += v[i] * v[i];
+                norm = Math.sqrt(norm);
+                if (!(norm > 0)) return null;
+                var out = new Array(v.length);
+                for (var i = 0; i < v.length; i++) out[i] = v[i] / norm;
+                return out;
+            }}
+            var p = normalize(projectVec);
+            var d = normalize(demandVec);
+            if (!p || !d) return null;
+            var dot = 0;
+            for (var i = 0; i < 17; i++) dot += p[i] * d[i];
+            return dot > 0 ? dot : null;
+        }}
+
+        function getCountryValue(code, mode, minIdx, maxIdx) {{
+            var data = window.COUNTRY_TOTALS;
+            var byCountry = getCountryByCountry(data, countrySelectedMdbIndex);
+            if (!byCountry) return 0;
+            var c = byCountry[code];
+            if (!c) return 0;
+            var rec = getCountryRecord(c);
+            if (!rec) return 0;
+            if (minIdx === 0 && maxIdx === countryYears.length - 1) {{
+                return mode === "count" ? rec.total_project_count : (rec.total_amount_usd / 1e9);
+            }}
+            var sumCount = 0, sumAmount = 0;
+            var py = rec.per_year || {{}};
+            for (var i = minIdx; i <= maxIdx; i++) {{
+                var y = String(countryYears[i]);
+                var bucket = py[y];
+                if (bucket) {{ sumCount += bucket.project_count || 0; sumAmount += bucket.amount_usd || 0; }}
+            }}
+            return mode === "count" ? sumCount : (sumAmount / 1e9);
+        }}
+
+        function hexToRgb(hex) {{
+            var m = hex.match(/^#?([a-f\\d]{{2}})([a-f\\d]{{2}})([a-f\\d]{{2}})$/i);
+            return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [47, 47, 53];
+        }}
+
+        function getCountryDominantSdgIndex(code, minIdx, maxIdx) {{
+            var data = window.COUNTRY_TOTALS;
+            var byCountry = getCountryByCountry(data, countrySelectedMdbIndex);
+            if (!byCountry || !byCountry[code] || !byCountry[code].per_sdg) return -1;
+            var perSdg = byCountry[code].per_sdg;
+            var bestIdx = -1, bestCount = -1;
+            for (var s = 0; s < 17; s++) {{
+                var rec = perSdg[s];
+                if (!rec) continue;
+                var c = 0;
+                if (minIdx === 0 && maxIdx === countryYears.length - 1) {{
+                    c = rec.total_project_count || 0;
+                }} else {{
+                    var py = rec.per_year || {{}};
+                    for (var i = minIdx; i <= maxIdx; i++) {{
+                        var y = String(countryYears[i]);
+                        var b = py[y];
+                        if (b) c += b.project_count || 0;
+                    }}
+                }}
+                if (c > bestCount) {{
+                    bestCount = c;
+                    bestIdx = s;
+                }}
+            }}
+            return bestIdx;
+        }}
+
+        function getCountryMapMetric(code, mode, minIdx, maxIdx) {{
+            if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0)
+                return getCountryNeedProjectCosine(code, minIdx, maxIdx);
+            return getCountryValue(code, mode, minIdx, maxIdx);
+        }}
+
+        // 全 SDG：高级灰阶；单 SDG：该 SDG 代表色谱（浅色→深色）
+        function getCountryColor(code, mode, minIdx, maxIdx, minV, maxV) {{
+            var v = getCountryMapMetric(code, mode, minIdx, maxIdx);
+            if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
+                if (v == null || !isFinite(v) || v <= 0) return "#ffffff";
+            }}
+            if (!(maxV > minV)) return countrySelectedSdgIndex ? "#f0f4f8" : "#E8E8EC";
+            var t = (v - minV) / (maxV - minV);
+            if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
+                t = t < 0 ? 0 : (t > 1 ? 1 : t);
+            }}
+            if (t <= 0) return countrySelectedSdgIndex ? "#f0f4f8" : "#E8E8EC";
+            if (countrySlideIndex === 0 && countrySelectedSdgIndex === 0) {{
+                var domIdx = getCountryDominantSdgIndex(code, minIdx, maxIdx);
+                var domColor = (domIdx >= 0 && window.SDG_COLORS && window.SDG_COLORS[domIdx]) ? window.SDG_COLORS[domIdx] : null;
+                if (!domColor) return "#E8E8EC";
+                if (t >= 1) return domColor;
+                var rgbDom = hexToRgb(domColor);
+                var rr = Math.round(240 + (rgbDom[0] - 240) * t);
+                var gg = Math.round(244 + (rgbDom[1] - 244) * t);
+                var bb = Math.round(248 + (rgbDom[2] - 248) * t);
+                rr = rr < 0 ? 0 : (rr > 255 ? 255 : rr);
+                gg = gg < 0 ? 0 : (gg > 255 ? 255 : gg);
+                bb = bb < 0 ? 0 : (bb > 255 ? 255 : bb);
+                return "rgb(" + rr + "," + gg + "," + bb + ")";
+            }}
+            if (t >= 1) {{
+                if (countrySelectedSdgIndex >= 1 && countrySelectedSdgIndex <= 17 && window.SDG_COLORS && window.SDG_COLORS[countrySelectedSdgIndex - 1])
+                    return window.SDG_COLORS[countrySelectedSdgIndex - 1];
+                return "#2F2F35";
+            }}
+            if (countrySelectedSdgIndex >= 1 && countrySelectedSdgIndex <= 17 && window.SDG_COLORS && window.SDG_COLORS[countrySelectedSdgIndex - 1]) {{
+                var rgb = hexToRgb(window.SDG_COLORS[countrySelectedSdgIndex - 1]);
+                var r = Math.round(240 + (rgb[0] - 240) * t);
+                var g = Math.round(244 + (rgb[1] - 244) * t);
+                var b = Math.round(248 + (rgb[2] - 248) * t);
+                r = r < 0 ? 0 : (r > 255 ? 255 : r);
+                g = g < 0 ? 0 : (g > 255 ? 255 : g);
+                b = b < 0 ? 0 : (b > 255 ? 255 : b);
+                return "rgb(" + r + "," + g + "," + b + ")";
+            }}
+            var r, g, b;
+            if (t <= 0.5) {{
+                var s = t * 2;
+                r = Math.round(0xE8 + (0x8A - 0xE8) * s);
+                g = Math.round(0xE8 + (0x8A - 0xE8) * s);
+                b = Math.round(0xEC + (0x8A - 0xEC) * s);
+            }} else {{
+                var s = (t - 0.5) * 2;
+                r = Math.round(0x8A + (0x2F - 0x8A) * s);
+                g = Math.round(0x8A + (0x2F - 0x8A) * s);
+                b = Math.round(0x8A + (0x35 - 0x8A) * s);
+            }}
+            r = r < 0 ? 0 : (r > 255 ? 255 : r);
+            g = g < 0 ? 0 : (g > 255 ? 255 : g);
+            b = b < 0 ? 0 : (b > 255 ? 255 : b);
+            return "rgb(" + r + "," + g + "," + b + ")";
+        }}
+
+        function countryDefaultStroke(alpha3) {{
+            if (alpha3 === selectedCountryCode)
+                return {{ stroke: "#1d4ed8", width: 2.5 }};
+            if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
+                var g = "Unknown";
+                if (alpha3 && window.COUNTRY_FY26_INCOME_GROUP && window.COUNTRY_FY26_INCOME_GROUP[alpha3])
+                    g = window.COUNTRY_FY26_INCOME_GROUP[alpha3];
+                var pal = {{ "L": "#d73027", "LM": "#fc8d59", "UM": "#4575b4", "H": "#1a9850", "..": "#9e9e9e", "Unknown": "#bdbdbd" }};
+                return {{ stroke: pal[g] || pal.Unknown, width: 4.1 }};
+            }}
+            return {{ stroke: "#fff", width: 0.5 }};
+        }}
+
+        function getCountryIncomeGroupLabel(alpha3) {{
+            var g = (alpha3 && window.COUNTRY_FY26_INCOME_GROUP && window.COUNTRY_FY26_INCOME_GROUP[alpha3]) ? window.COUNTRY_FY26_INCOME_GROUP[alpha3] : "Unknown";
+            if (g === "L") return "LIC";
+            if (g === "LM") return "LMC";
+            if (g === "UM") return "UMC";
+            if (g === "H") return "HIC";
+            return "Unknown";
+        }}
+
+        function positionTooltipInRect(tooltipEl, containerRect, pointerX, pointerY, pad) {{
+            if (!tooltipEl || !containerRect) return;
+            var safePad = (typeof pad === "number" ? pad : 12);
+            var tw = tooltipEl.offsetWidth || 180;
+            var th = tooltipEl.offsetHeight || 72;
+            var left = (pointerX > containerRect.width * 0.55) ? (pointerX - tw - safePad) : (pointerX + safePad);
+            var top = pointerY + 8;
+            var maxLeft = containerRect.width - tw - safePad;
+            var maxTop = containerRect.height - th - safePad;
+            if (left < safePad) left = safePad;
+            if (maxLeft >= safePad && left > maxLeft) left = maxLeft;
+            if (top < safePad) top = safePad;
+            if (maxTop >= safePad && top > maxTop) top = maxTop;
+            tooltipEl.style.left = left + "px";
+            tooltipEl.style.top = top + "px";
+        }}
+
+        window.initCountryMap = function() {{
+            var errEl = document.getElementById("country-map-error");
+            if (errEl) {{ errEl.classList.remove("visible"); errEl.textContent = ""; }}
+            if (!window.COUNTRY_TOTALS) {{ if (errEl) {{ errEl.textContent = "Country data not loaded."; errEl.classList.add("visible"); }} return; }}
+
+            var isoMap = window.ISO_NUMERIC_TO_ALPHA2 || {{}};
+            var byCountry = getCountryByCountry(window.COUNTRY_TOTALS, countrySelectedMdbIndex) || {{}};
+            var codes = Object.keys(byCountry);
+            var minV = Infinity, maxV = -Infinity;
+            if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
+                minV = 0;
+                maxV = 1;
+            }} else {{
+                for (var i = 0; i < codes.length; i++) {{
+                    var v = getCountryValue(codes[i], countryMode, countryMinIdx, countryMaxIdx);
+                    if (v > maxV) maxV = v;
+                    if (v < minV) minV = v;
+                }}
+                if (!(maxV > minV)) {{ minV = 0; maxV = 1; }}
+            }}
+
+            function drawMap() {{
+                if (!window.d3 || !window.topojson) {{ if (errEl) {{ errEl.textContent = "D3 or TopoJSON not loaded."; errEl.classList.add("visible"); }} return; }}
+                var svg = d3.select("#country-map-svg");
+                svg.selectAll("*").remove();
+                if (!countryFeatures) {{ if (errEl) {{ errEl.textContent = "Map data not loaded."; errEl.classList.add("visible"); }} return; }}
+
+                // 地图显示比例：由 projection.scale() 决定，scale = (width/2π)*scaleFactor。
+                // scaleFactor 越小整张图越小、四周越完整；越大则放大。可与绘图区宽高关联或手动调试。
+                var scaleFactor = 1;
+                var projection = d3.geoMercator()
+                    .scale(countryMapWidth / (2 * Math.PI) * scaleFactor)
+                    .translate([countryMapWidth / 2, countryMapHeight / 2])
+                    .center([0, 20]);
+                var path = d3.geoPath().projection(projection);
+
+                // 不绘制海洋，留白（依赖容器背景 #fff）
+                var g = svg.append("g");
+                var tooltipEl = document.getElementById("country-tooltip");
+                var mapEl = document.getElementById("country-map");
+                var useIncomeBorderMode = (countrySlideIndex === -1 && countrySelectedSdgIndex === 0);
+                function countryClipId(d) {{
+                    var id = d && d.id != null ? String(d.id) : "na";
+                    return "country-clip-" + id.replace(/[^a-zA-Z0-9_-]/g, "_");
+                }}
+                if (useIncomeBorderMode) {{
+                    var defs = svg.append("defs");
+                    var clips = defs.selectAll("clipPath.country-clip")
+                        .data(countryFeatures.features)
+                        .enter()
+                        .append("clipPath")
+                        .attr("class", "country-clip")
+                        .attr("id", function(d) {{ return countryClipId(d); }});
+                    clips.append("path").attr("d", path);
+                }}
+
+                g.selectAll("path.country")
+                    .data(countryFeatures.features)
+                    .enter().append("path")
+                    .attr("class", function(d) {{
+                        var id = d.id != null ? String(d.id) : "";
+                        var alpha2 = isoMap[id] || "";
+                        var alpha3 = (alpha2 && window.ALPHA2_TO_ALPHA3) ? window.ALPHA2_TO_ALPHA3[alpha2] : "";
+                        return "country" + (alpha3 === selectedCountryCode ? " selected" : "");
+                    }})
+                    .attr("d", path)
+                    .attr("fill", function(d) {{
+                        var id = d.id != null ? String(d.id) : "";
+                        var alpha2 = isoMap[id] || "";
+                        var alpha3 = (alpha2 && window.ALPHA2_TO_ALPHA3) ? window.ALPHA2_TO_ALPHA3[alpha2] : "";
+                        return getCountryColor(alpha3, countryMode, countryMinIdx, countryMaxIdx, minV, maxV);
+                    }})
+                    .attr("clip-path", function(d) {{
+                        return useIncomeBorderMode ? ("url(#" + countryClipId(d) + ")") : null;
+                    }})
+                    .attr("stroke-linejoin", "round")
+                    .attr("stroke-linecap", "round")
+                    .attr("vector-effect", "non-scaling-stroke")
+                    .attr("stroke", function(d) {{
+                        var id = d.id != null ? String(d.id) : "";
+                        var alpha2 = isoMap[id] || "";
+                        var alpha3 = (alpha2 && window.ALPHA2_TO_ALPHA3) ? window.ALPHA2_TO_ALPHA3[alpha2] : "";
+                        var st = countryDefaultStroke(alpha3);
+                        return st.stroke;
+                    }})
+                    .attr("stroke-width", function(d) {{
+                        var id = d.id != null ? String(d.id) : "";
+                        var alpha2 = isoMap[id] || "";
+                        var alpha3 = (alpha2 && window.ALPHA2_TO_ALPHA3) ? window.ALPHA2_TO_ALPHA3[alpha2] : "";
+                        var st = countryDefaultStroke(alpha3);
+                        return st.width;
+                    }})
+                    .on("mouseover", function(ev, d) {{
+                        var id = d.id != null ? String(d.id) : "";
+                        var alpha2 = isoMap[id] || "";
+                        var alpha3 = (alpha2 && window.ALPHA2_TO_ALPHA3) ? window.ALPHA2_TO_ALPHA3[alpha2] : "";
+                        if (selectedCountryCode) {{
+                            if (alpha3 === selectedCountryCode) d3.select(this).attr("stroke", "#374151").attr("stroke-width", 2.5);
+                            return;
+                        }}
+                        d3.select(this).attr("stroke", "#374151").attr("stroke-width", useIncomeBorderMode ? 4.2 : 1);
+                        var name = (d.properties && d.properties.name) || alpha2 || "?";
+                        var countVal = getCountryValue(alpha3, "count", countryMinIdx, countryMaxIdx);
+                        var amountVal = getCountryValue(alpha3, "amount", countryMinIdx, countryMaxIdx);
+                        var dominantSdg = getCountryDominantSdgIndex(alpha3, countryMinIdx, countryMaxIdx);
+                        var dominantSdgLine = (dominantSdg >= 0)
+                            ? ("Dominant SDG (by projects): SDG " + (dominantSdg + 1) + (window.SDG_GOAL_NAMES && window.SDG_GOAL_NAMES[dominantSdg] ? (" (" + window.SDG_GOAL_NAMES[dominantSdg] + ")") : ""))
+                            : "Dominant SDG (by projects): N/A";
+                        var cosineVal = getCountryNeedProjectCosine(alpha3, countryMinIdx, countryMaxIdx);
+                        var incomeLabel = getCountryIncomeGroupLabel(alpha3);
+                        if (tooltipEl && mapEl) {{
+                            var rect = mapEl.getBoundingClientRect();
+                            if (countrySlideIndex === 0 && countrySelectedSdgIndex === 0) {{
+                                tooltipEl.innerHTML = "<strong>" + name + "</strong><br/>" + dominantSdgLine + "<br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                            }} else if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
+                                tooltipEl.innerHTML = "<strong>" + name + "</strong><br/>Income group (FY26): " + incomeLabel + "<br/>Country-Level SDG Alignment: " + formatNeedProjectCosine(cosineVal) + "<br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                            }} else {{
+                                tooltipEl.innerHTML = "<strong>" + name + "</strong><br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                            }}
+                            tooltipEl.style.display = "block";
+                            var dx = ev.clientX - rect.left;
+                            var dy = ev.clientY - rect.top;
+                            positionTooltipInRect(tooltipEl, rect, dx, dy, 12);
+                        }}
+                    }})
+                    .on("mousemove", function(ev, d) {{
+                        if (selectedCountryCode) return;
+                        if (tooltipEl && mapEl) {{
+                            var rect = mapEl.getBoundingClientRect();
+                            var dx = ev.clientX - rect.left;
+                            var dy = ev.clientY - rect.top;
+                            positionTooltipInRect(tooltipEl, rect, dx, dy, 12);
+                        }}
+                    }})
+                    .on("mouseout", function(ev, d) {{
+                        var id = d.id != null ? String(d.id) : "";
+                        var alpha2 = isoMap[id] || "";
+                        var alpha3 = (alpha2 && window.ALPHA2_TO_ALPHA3) ? window.ALPHA2_TO_ALPHA3[alpha2] : "";
+                        if (selectedCountryCode) {{
+                            if (alpha3 === selectedCountryCode) {{
+                                var stSel = countryDefaultStroke(alpha3);
+                                d3.select(this).attr("stroke", stSel.stroke).attr("stroke-width", stSel.width);
+                            }}
+                            return;
+                        }}
+                        var st0 = countryDefaultStroke(alpha3);
+                        d3.select(this).attr("stroke", st0.stroke).attr("stroke-width", st0.width);
+                        if (tooltipEl) tooltipEl.style.display = "none";
+                    }})
+                    .on("click", function(ev, d) {{
+                        ev.stopPropagation();
+                        var id = d.id != null ? String(d.id) : "";
+                        var alpha2 = isoMap[id] || "";
+                        var alpha3 = (alpha2 && window.ALPHA2_TO_ALPHA3) ? window.ALPHA2_TO_ALPHA3[alpha2] : "";
+                        if (selectedCountryCode === alpha3) {{
+                            selectedCountryCode = null;
+                            pinnedTooltip = null;
+                        }} else {{
+                            selectedCountryCode = alpha3;
+                            var name = (d.properties && d.properties.name) || alpha2 || "?";
+                            var countVal = getCountryValue(alpha3, "count", countryMinIdx, countryMaxIdx);
+                            var amountVal = getCountryValue(alpha3, "amount", countryMinIdx, countryMaxIdx);
+                            var dominantSdg = getCountryDominantSdgIndex(alpha3, countryMinIdx, countryMaxIdx);
+                            var dominantSdgLine = (dominantSdg >= 0)
+                                ? ("Dominant SDG (by projects): SDG " + (dominantSdg + 1) + (window.SDG_GOAL_NAMES && window.SDG_GOAL_NAMES[dominantSdg] ? (" (" + window.SDG_GOAL_NAMES[dominantSdg] + ")") : ""))
+                                : "Dominant SDG (by projects): N/A";
+                            var cosineVal = getCountryNeedProjectCosine(alpha3, countryMinIdx, countryMaxIdx);
+                            var incomeLabel = getCountryIncomeGroupLabel(alpha3);
+                            var rect = mapEl.getBoundingClientRect();
+                            var dx = ev.clientX - rect.left;
+                            var dy = ev.clientY - rect.top;
+                            var html = "<strong>" + name + "</strong><br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                            if (countrySlideIndex === 0 && countrySelectedSdgIndex === 0)
+                                html = "<strong>" + name + "</strong><br/>" + dominantSdgLine + "<br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                            else if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0)
+                                html = "<strong>" + name + "</strong><br/>Income group (FY26): " + incomeLabel + "<br/>Country-Level SDG Alignment: " + formatNeedProjectCosine(cosineVal) + "<br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                            tooltipEl.innerHTML = html;
+                            tooltipEl.style.display = "block";
+                            positionTooltipInRect(tooltipEl, rect, dx, dy, 12);
+                            pinnedTooltip = {{ html: html, left: tooltipEl.style.left, top: tooltipEl.style.top }};
+                        }}
+                        drawMap();
+                        updateCountryArrows();
+                    }});
+
+                g.append("path")
+                    .datum(topojson.mesh(countryWorldData, countryWorldData.objects.countries, function(a, b) {{ return a !== b; }}))
+                    .attr("fill", "none")
+                    .attr("stroke", (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) ? "#ffffff" : "#94a3b8")
+                    .attr("stroke-width", (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) ? 0.6 : 0.3)
+                    .attr("d", path);
+
+                if (selectedCountryCode) {{
+                    var name = (window.COUNTRY_NAMES && window.COUNTRY_NAMES[selectedCountryCode]) ? window.COUNTRY_NAMES[selectedCountryCode] : selectedCountryCode;
+                    var countVal = getCountryValue(selectedCountryCode, "count", countryMinIdx, countryMaxIdx);
+                    var amountVal = getCountryValue(selectedCountryCode, "amount", countryMinIdx, countryMaxIdx);
+                    var incomeLabelSel = getCountryIncomeGroupLabel(selectedCountryCode);
+                    pinnedTooltip = pinnedTooltip || {{}};
+                    if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
+                        var cosSel = getCountryNeedProjectCosine(selectedCountryCode, countryMinIdx, countryMaxIdx);
+                        pinnedTooltip.html = "<strong>" + name + "</strong><br/>Income group (FY26): " + incomeLabelSel + "<br/>Country-Level SDG Alignment: " + formatNeedProjectCosine(cosSel) + "<br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                    }} else if (countrySlideIndex === 0 && countrySelectedSdgIndex === 0) {{
+                        var domSel = getCountryDominantSdgIndex(selectedCountryCode, countryMinIdx, countryMaxIdx);
+                        var domLineSel = (domSel >= 0)
+                            ? ("Dominant SDG (by projects): SDG " + (domSel + 1) + (window.SDG_GOAL_NAMES && window.SDG_GOAL_NAMES[domSel] ? (" (" + window.SDG_GOAL_NAMES[domSel] + ")") : ""))
+                            : "Dominant SDG (by projects): N/A";
+                        pinnedTooltip.html = "<strong>" + name + "</strong><br/>" + domLineSel + "<br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                    }} else {{
+                        pinnedTooltip.html = "<strong>" + name + "</strong><br/>Project count: " + countVal + "<br/>Amount: " + amountVal.toFixed(2) + " B USD";
+                    }}
+                }}
+                if (selectedCountryCode && pinnedTooltip && tooltipEl) {{
+                    tooltipEl.innerHTML = pinnedTooltip.html;
+                    tooltipEl.style.left = pinnedTooltip.left;
+                    tooltipEl.style.top = pinnedTooltip.top;
+                    tooltipEl.style.display = "block";
+                }} else if (!selectedCountryCode && tooltipEl) {{
+                    tooltipEl.style.display = "none";
+                }}
+
+                // 图例已移至 HTML .map-overlay-panel：更新文案与单 SDG 时的色谱
+                var legendLabel = document.getElementById("country-legend-label");
+                var legendMin = document.getElementById("country-legend-min");
+                var legendMax = document.getElementById("country-legend-max");
+                var legendBar = document.getElementById("country-legend-bar");
+                if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
+                    if (legendLabel) legendLabel.textContent = "Country-Level SDG Alignment (0–1)";
+                    if (legendMin) legendMin.textContent = "0";
+                    if (legendMax) legendMax.textContent = "1";
+                }} else {{
+                    if (legendLabel) legendLabel.textContent = countryMode === "count" ? "Projects" : "B USD";
+                    if (legendMin) legendMin.textContent = minV === maxV ? "" : (countryMode === "count" ? Math.round(minV) : minV.toFixed(1));
+                    if (legendMax) legendMax.textContent = minV === maxV ? "" : (countryMode === "count" ? Math.round(maxV) : maxV.toFixed(1));
+                }}
+                if (legendBar) {{
+                    if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0)
+                        legendBar.style.background = "linear-gradient(to right, #E8E8EC, #8A8A8A, #2F2F35)";
+                    else if (countrySelectedSdgIndex >= 1 && countrySelectedSdgIndex <= 17 && window.SDG_COLORS && window.SDG_COLORS[countrySelectedSdgIndex - 1])
+                        legendBar.style.background = "linear-gradient(to right, #f0f4f8, " + window.SDG_COLORS[countrySelectedSdgIndex - 1] + ")";
+                    else
+                        legendBar.style.background = "linear-gradient(to right, #E8E8EC, #8A8A8A, #2F2F35)";
+                }}
+                var incLeg = document.getElementById("country-income-legend");
+                if (incLeg) incLeg.style.display = (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) ? "flex" : "none";
+                var metricSwitch = document.getElementById("map-metric-switch");
+                if (metricSwitch) metricSwitch.style.display = (countrySlideIndex === 1) ? "flex" : "none";
+                var overlayPanel = document.querySelector("#country-panel .map-overlay-panel");
+                if (overlayPanel) overlayPanel.classList.toggle("cosine-legend-mode", countrySlideIndex === -1 && countrySelectedSdgIndex === 0);
+            }}
+
+            if (countryFeatures) {{
+                drawMap();
+            }} else if (window.COUNTRY_TOPOLOGY && window.COUNTRY_TOPOLOGY.objects && window.COUNTRY_TOPOLOGY.objects.countries) {{
+                countryWorldData = window.COUNTRY_TOPOLOGY;
+                if (window.topojson) {{
+                    countryFeatures = topojson.feature(countryWorldData, countryWorldData.objects.countries);
+                    drawMap();
+                }} else {{ if (errEl) {{ errEl.textContent = "TopoJSON 库未加载."; errEl.classList.add("visible"); }} }}
+            }} else {{
+                if (errEl) {{ errEl.textContent = "地图数据未就绪，请确保 data/countries-110m.json 或 countries-10m.json 存在并重新生成页面."; errEl.classList.add("visible"); }}
+            }}
+
+            var countryBackBtn = document.getElementById("country-back-btn");
+            if (countryBackBtn) countryBackBtn.classList.toggle("visible", countrySelectedMdbIndex > 0);
+
+            updateCountryArrows();
+
+            var countryTitleEl = document.getElementById("country-map-chart-title");
+            if (countryTitleEl && window.MDB_NAMES) {{
+                var yearRange = (typeof countryYears !== "undefined" && countryYears.length && typeof countryMinIdx !== "undefined" && typeof countryMaxIdx !== "undefined")
+                    ? (countryYears[countryMinIdx] + (countryMinIdx === countryMaxIdx ? "" : "\u2013" + countryYears[countryMaxIdx]))
+                    : "2016\u20132025";
+                var baseTitle;
+                if (countrySlideIndex === -1 && countrySelectedSdgIndex === 0) {{
+                    baseTitle = (countrySelectedMdbIndex === 0)
+                        ? "Need-Project Cosine Similarity by Country (" + yearRange + ")"
+                        : window.MDB_NAMES[countrySelectedMdbIndex - 1] + " Need-Project Cosine Similarity by Country (" + yearRange + ")";
+                }} else if (countrySlideIndex === 0 && countrySelectedSdgIndex === 0) {{
+                    baseTitle = (countrySelectedMdbIndex === 0)
+                        ? "Dominant SDG Color Map by Country (" + yearRange + ")"
+                        : window.MDB_NAMES[countrySelectedMdbIndex - 1] + " Dominant SDG Color Map by Country (" + yearRange + ")";
+                }} else {{
+                    baseTitle = (countrySelectedMdbIndex === 0)
+                        ? "MDB Operations by Country (" + yearRange + ")"
+                        : window.MDB_NAMES[countrySelectedMdbIndex - 1] + " Operations by Country (" + yearRange + ")";
+                }}
+                if (countrySelectedSdgIndex >= 1 && countrySelectedSdgIndex <= 17 && window.SDG_GOAL_NAMES && window.SDG_GOAL_NAMES[countrySelectedSdgIndex - 1])
+                    baseTitle += " \u00B7 SDG " + countrySelectedSdgIndex + " (" + window.SDG_GOAL_NAMES[countrySelectedSdgIndex - 1] + ")";
+                countryTitleEl.textContent = baseTitle;
+            }}
+
+            document.querySelectorAll("#country-panel .map-sdg-logo-wrap").forEach(function(wrap) {{
+                var idx = parseInt(wrap.getAttribute("data-sdg-index"), 10);
+                wrap.classList.toggle("selected", idx === countrySelectedSdgIndex);
+            }});
+
+            var ticksEl = document.getElementById("country-year-slider-ticks");
+            if (ticksEl && !ticksEl.innerHTML) {{
+                for (var i = 0; i < countryYears.length; i++) {{
+                    var span = document.createElement("span");
+                    span.textContent = String(countryYears[i]);
+                    span.title = "Show data for " + countryYears[i] + " only";
+                    ticksEl.appendChild(span);
+                }}
+            }}
+            requestAnimationFrame(function() {{
+                var track = document.getElementById("country-year-slider-track");
+                if (track) {{
+                    var rect = track.getBoundingClientRect();
+                    cTrackLeft = 0;
+                    cTrackRight = rect.width;
+                    if (cTrackRight > 0) countryUpdateSliderUI();
+                }}
+            }});
+        }};
+
+        function getCountryTickCenters() {{
+            countryTickCenters = [];
+            var track = document.getElementById("country-year-slider-track");
+            var ticksEl = document.getElementById("country-year-slider-ticks");
+            if (!track || !ticksEl || ticksEl.children.length !== countryYears.length) return;
+            var trackRect = track.getBoundingClientRect();
+            for (var i = 0; i < countryYears.length; i++) {{
+                var span = ticksEl.children[i];
+                var r = span.getBoundingClientRect();
+                countryTickCenters.push((r.left - trackRect.left) + r.width / 2);
+            }}
+        }}
+
+        function countryYearIndexToX(idx) {{
+            var t = countryYears.length - 1;
+            if (t <= 0) return cTrackLeft;
+            if (countryTickCenters.length === countryYears.length && countryTickCenters[idx] != null)
+                return countryTickCenters[idx];
+            return cTrackLeft + (idx / t) * (cTrackRight - cTrackLeft);
+        }}
+
+        function countrySetHandlePositionsOnly(leftPx, rightPx) {{
+            var cMin = document.getElementById("country-handle-min");
+            var cMax = document.getElementById("country-handle-max");
+            var cRange = document.getElementById("country-year-slider-range");
+            if (cMin) cMin.style.left = leftPx + "px";
+            if (cMax) cMax.style.left = rightPx + "px";
+            if (cRange) {{ cRange.style.left = leftPx + "px"; cRange.style.width = Math.max(0, rightPx - leftPx) + "px"; }}
+        }}
+
+        function countryUpdateSliderUI() {{
+            var track = document.getElementById("country-year-slider-track");
+            if (!track) return;
+            var rect = track.getBoundingClientRect();
+            if (rect.width <= 0) return;
+            getCountryTickCenters();
+            var t = countryYears.length - 1;
+            if (countryTickCenters.length === countryYears.length) {{
+                var tick0 = countryTickCenters[0];
+                var tickN = countryTickCenters[t];
+                cTrackLeft = tick0 - cOffsetPx + cRailShiftPx;
+                cTrackRight = tickN + cOffsetPx + cRailShiftPx;
+                var cRail = track.querySelector(".year-slider-rail");
+                if (cRail) {{
+                    cRail.style.left = cTrackLeft + "px";
+                    cRail.style.width = (cTrackRight - cTrackLeft) + "px";
+                    cRail.style.right = "auto";
+                }}
+            }} else {{
+                if (cTrackRight <= cTrackLeft) {{ cTrackLeft = 0; cTrackRight = rect.width; }}
+            }}
+            var xMin = countryYearIndexToX(countryMinIdx);
+            var xMax = countryYearIndexToX(countryMaxIdx);
+            var leftPx = xMin - cOffsetPx + cRailShiftPx;
+            var rightPx = xMax + cOffsetPx + cRailShiftPx;
+            if (leftPx < cTrackLeft) leftPx = cTrackLeft;
+            if (rightPx > cTrackRight) rightPx = cTrackRight;
+            cXMinPx = leftPx;
+            cXMaxPx = rightPx;
+            countrySetHandlePositionsOnly(leftPx, rightPx);
+        }}
+
+        var countryYearSliderAnimRaf = null;
+        function countryComputeHandlePxPair(mi, ma) {{
+            var track = document.getElementById("country-year-slider-track");
+            if (!track) return null;
+            var rect = track.getBoundingClientRect();
+            if (rect.width <= 0) return null;
+            getCountryTickCenters();
+            var t = countryYears.length - 1;
+            if (countryTickCenters.length === countryYears.length) {{
+                var tick0 = countryTickCenters[0];
+                var tickN = countryTickCenters[t];
+                cTrackLeft = tick0 - cOffsetPx + cRailShiftPx;
+                cTrackRight = tickN + cOffsetPx + cRailShiftPx;
+                var cRail = track.querySelector(".year-slider-rail");
+                if (cRail) {{
+                    cRail.style.left = cTrackLeft + "px";
+                    cRail.style.width = (cTrackRight - cTrackLeft) + "px";
+                    cRail.style.right = "auto";
+                }}
+            }} else {{
+                if (cTrackRight <= cTrackLeft) {{ cTrackLeft = 0; cTrackRight = rect.width; }}
+            }}
+            var xMin = countryYearIndexToX(mi);
+            var xMax = countryYearIndexToX(ma);
+            var leftPx = xMin - cOffsetPx + cRailShiftPx;
+            var rightPx = xMax + cOffsetPx + cRailShiftPx;
+            if (leftPx < cTrackLeft) leftPx = cTrackLeft;
+            if (rightPx > cTrackRight) rightPx = cTrackRight;
+            return {{ leftPx: leftPx, rightPx: rightPx }};
+        }}
+        window._countryCancelYearSliderAnim = function() {{
+            if (countryYearSliderAnimRaf) {{
+                cancelAnimationFrame(countryYearSliderAnimRaf);
+                countryYearSliderAnimRaf = null;
+            }}
+        }};
+        window._countryAnimateYearRangeTo = function(tMin, tMax, onDone) {{
+            window._countryCancelYearSliderAnim();
+            countryUpdateSliderUI();
+            var endPair = countryComputeHandlePxPair(tMin, tMax);
+            if (!endPair) {{
+                countryMinIdx = tMin;
+                countryMaxIdx = tMax;
+                countryUpdateSliderUI();
+                if (onDone) onDone();
+                return;
+            }}
+            var s0 = cXMinPx;
+            var s1 = cXMaxPx;
+            var e0 = endPair.leftPx;
+            var e1 = endPair.rightPx;
+            var duration = 320;
+            var startTs = performance.now();
+            function easeOutCubicC(t) {{ return 1 - Math.pow(1 - t, 3); }}
+            function cFrame(now) {{
+                var u = Math.min(1, (now - startTs) / duration);
+                var k = easeOutCubicC(u);
+                countrySetHandlePositionsOnly(s0 + (e0 - s0) * k, s1 + (e1 - s1) * k);
+                if (u < 1) {{
+                    countryYearSliderAnimRaf = requestAnimationFrame(cFrame);
+                }} else {{
+                    countryYearSliderAnimRaf = null;
+                    countryMinIdx = tMin;
+                    countryMaxIdx = tMax;
+                    countryUpdateSliderUI();
+                    if (onDone) onDone();
+                }}
+            }}
+            countryYearSliderAnimRaf = requestAnimationFrame(cFrame);
+        }};
+
+        document.addEventListener("DOMContentLoaded", function() {{
+            var countryBackBtn = document.getElementById("country-back-btn");
+            if (countryBackBtn) {{
+                countryBackBtn.addEventListener("click", function() {{
+                    countrySelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    if (typeof window.initCountryMap === "function") window.initCountryMap();
+                }});
+            }}
+            var countryBarchartBackBtn = document.getElementById("country-barchart-back-btn");
+            if (countryBarchartBackBtn) {{
+                countryBarchartBackBtn.addEventListener("click", function() {{
+                    countrySelectedMdbIndex = 0;
+                    document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
+                    if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    if (typeof window.initCountryBarChart === "function") {{ try {{ window.initCountryBarChart(); }} catch (e) {{ console.error("initCountryBarChart:", e); }} }}
+                }});
+            }}
+            var countryMapEl = document.getElementById("country-map");
+            if (countryMapEl) {{
+                countryMapEl.addEventListener("click", function(ev) {{
+                    if (ev.target.classList && ev.target.classList.contains("country")) return;
+                    selectedCountryCode = null;
+                    pinnedTooltip = null;
+                    if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    updateCountryArrows();
+                }});
+            }}
+            var countryArrowRight = document.getElementById("country-arrow-right");
+            var countryArrowLeft = document.getElementById("country-arrow-left");
+            var countryArrowLeftZero = document.getElementById("country-arrow-left-zero");
+            if (countryArrowRight) {{
+                countryArrowRight.addEventListener("click", function() {{
+                    if (!DASHBOARD_LITE && countrySlideIndex === -1) {{
+                        countrySlideIndex = 0;
+                        updateCountryArrows();
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }} else if (!DASHBOARD_LITE && countrySlideIndex === 0) {{
+                        countrySlideIndex = 1;
+                        updateCountryArrows();
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }} else if (countrySlideIndex === 1) {{
+                        countrySlideIndex = 2;
+                        updateCountryArrows();
+                        if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
+                        requestAnimationFrame(function() {{
+                            if (typeof window.initCountryRadarRing === "function") {{ try {{ window.initCountryRadarRing(); }} catch (e) {{ console.error("initCountryRadarRing:", e); }} }}
+                        }});
+                    }} else if (countrySlideIndex === 2) {{
+                        countrySlideIndex = 3;
+                        updateCountryArrows();
+                        if (typeof syncMapSwitchFromRadar === "function") syncMapSwitchFromRadar();
+                        if (typeof window.initCountryBarChart === "function") {{
+                            try {{ window.initCountryBarChart(); }} catch (e) {{ console.error("Error initializing country bar chart:", e); }}
+                        }}
+                    }}
+                }});
+            }}
+            if (countryArrowLeft) {{
+                countryArrowLeft.addEventListener("click", function() {{
+                    if (countrySlideIndex === 3) {{
+                        countrySlideIndex = 2;
+                        updateCountryArrows();
+                        if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
+                        requestAnimationFrame(function() {{
+                            if (typeof window.initCountryRadarRing === "function") {{ try {{ window.initCountryRadarRing(); }} catch (e) {{ console.error("initCountryRadarRing:", e); }} }}
+                        }});
+                    }} else if (countrySlideIndex === 2) {{
+                        countrySlideIndex = 1;
+                        updateCountryArrows();
+                        if (typeof syncMapSwitchFromRadar === "function") syncMapSwitchFromRadar();
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }}
+                }});
+            }}
+            if (countryArrowLeftZero) {{
+                countryArrowLeftZero.addEventListener("click", function() {{
+                    if (DASHBOARD_LITE) return;
+                    if (countrySlideIndex === 1) {{
+                        countrySlideIndex = 0;
+                        updateCountryArrows();
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }} else if (countrySlideIndex === 0) {{
+                        countrySlideIndex = -1;
+                        updateCountryArrows();
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }}
+                }});
+            }}
+
+            var mdbArrowRight = document.getElementById("mdb-arrow-right");
+            var mdbArrowLeft = document.getElementById("mdb-arrow-left");
+            if (mdbArrowRight) {{
+                mdbArrowRight.addEventListener("click", function() {{
+                    if (mdbSlideIndex < MDB_SLIDE_MAX) {{
+                        mdbSlideIndex += 1;
+                        updateMdbArrows();
+                    }}
+                }});
+            }}
+            if (mdbArrowLeft) {{
+                mdbArrowLeft.addEventListener("click", function() {{
+                    if (mdbSlideIndex > 0) {{
+                        mdbSlideIndex -= 1;
+                        updateMdbArrows();
+                    }}
+                }});
+            }}
+
+            var homeArrowRight = document.getElementById("home-arrow-right");
+            var homeArrowLeft = document.getElementById("home-arrow-left");
+            if (homeArrowRight) {{
+                homeArrowRight.addEventListener("click", function() {{
+                    if (homeSlideIndex < homeSlideMaxIndex()) {{
+                        homeSlideIndex += 1;
+                        updateHomeArrows();
+                    }}
+                }});
+            }}
+            if (homeArrowLeft) {{
+                homeArrowLeft.addEventListener("click", function() {{
+                    if (homeSlideIndex > 0) {{
+                        homeSlideIndex -= 1;
+                        updateHomeArrows();
+                        if (homeSlideIndex === 0 && typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+                    }}
+                }});
+            }}
+
+            document.querySelectorAll("#home-panel .home-sdg-legend-item").forEach(function(item) {{
+                item.addEventListener("click", function() {{
+                    var idx = Number(item.getAttribute("data-sdg-index")) || 0;
+                    if (currentView === "home" && homeSlideIsType(homeSlideIndex, "chord")) {{
+                        homeChordSelectedSdgIndex = idx;
+                        syncHomeChordLegendSelection();
+                        redrawHomeRightSlide();
+                        return;
+                    }}
+                    if (idx === 0) {{
+                        homeAllSdgLegendSelected = !homeAllSdgLegendSelected;
+                        item.classList.toggle("selected", homeAllSdgLegendSelected);
+                        if (currentView === "home") {{
+                            if (homeSlideIndex === 0 && typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+                            else redrawHomeRightSlide();
+                        }}
+                    }}
+                }});
+            }});
+
+            window.initCountryRadarRing = function() {{
+                var canvas = document.getElementById("country-radar-ring-canvas");
+                var wrap = canvas ? canvas.closest(".country-radar-wrap") : null;
+                if (!canvas || !wrap) return;
+                var rect = wrap.getBoundingClientRect();
+                var size = Math.min(Math.floor(rect.width), Math.floor(rect.height)) || 400;
+                var dpr = window.devicePixelRatio || 1;
+                canvas.width = size * dpr;
+                canvas.height = size * dpr;
+                canvas.style.width = size + "px";
+                canvas.style.height = size + "px";
+                var ctx = canvas.getContext("2d");
+                if (!ctx) return;
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.scale(dpr, dpr);
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = "high";
+                if (typeof window.initCountryRadarChart === "function") {{
+                    try {{ window.initCountryRadarChart(); }} catch (e) {{ console.error("initCountryRadarChart:", e); }}
+                }}
+            }};
+
+            window.initCountryRadarChart = function() {{
+                var canvas = document.getElementById("country-radar-ring-canvas");
+                if (!canvas || !window.COUNTRY_TOTALS || !window.SDG_COLORS) return;
+                if (typeof getCountryByCountry !== "function") return;
+                var ctx = canvas.getContext("2d");
+                if (!ctx) return;
+                var dpr = window.devicePixelRatio || 1;
+                var size = canvas.width / dpr;
+                var cx = size / 2;
+                var cy = size / 2;
+                var ringImg = window._countryRadarRingBgImage || null;
+                if (!ringImg) {{
+                    ringImg = new Image();
+                    ringImg.src = "{sdg_ring_crop_path}";
+                    ringImg.onload = function() {{
+                        if (typeof window.initCountryRadarChart === "function") {{
+                            try {{ window.initCountryRadarChart(); }} catch (e) {{ console.error("initCountryRadarChart:", e); }}
+                        }}
+                    }};
+                    window._countryRadarRingBgImage = ringImg;
+                }}
+                function drawRingBackground() {{
+                    if (!ringImg || !ringImg.complete || !ringImg.naturalWidth) return;
+                    var bgSize = size * 0.96;
+                    var bgX = (size - bgSize) / 2;
+                    var bgY = (size - bgSize) / 2;
+                    ctx.drawImage(ringImg, bgX, bgY, bgSize, bgSize);
+                }}
+                var mdbIndex = countrySelectedMdbIndex || 0;
+                var countryCode = selectedCountryCode || "";
+                var countryName = (window.COUNTRY_NAMES && countryCode && window.COUNTRY_NAMES[countryCode]) ? window.COUNTRY_NAMES[countryCode] : (countryCode || "Selected Country");
+                var byCountry = getCountryByCountry(window.COUNTRY_TOTALS, mdbIndex);
+                var countryData = byCountry && countryCode ? byCountry[countryCode] : null;
+                var radarBackBtn = document.getElementById("country-radar-back-btn");
+                if (radarBackBtn) radarBackBtn.classList.toggle("visible", mdbIndex > 0);
+                var titleEl = document.querySelector(".country-radar-chart-title .chart-title");
+                if (titleEl) {{
+                    var titleText = "MDB Operations in " + countryName + " (2016-2025)";
+                    if (mdbIndex > 0 && window.MDB_NAMES && window.MDB_NAMES[mdbIndex - 1]) {{
+                        titleText = window.MDB_NAMES[mdbIndex - 1] + " Operations in " + countryName + " (2016-2025)";
+                    }}
+                    titleEl.textContent = titleText;
+                }}
+                var n = 17;
+                var anglePer = (2 * Math.PI) / n;
+                var gapAngle = anglePer * 0.03;
+                var sectorAngle = anglePer - gapAngle * 2;
+                var rInner = size * 0.12;
+                var rOuter = size * 0.45;
+                var radarMode = window.countryRadarMode || countryMode || "count";
+                var trackEl = document.getElementById("radar-switch-track");
+                if (trackEl) {{
+                    radarMode = trackEl.classList.contains("on") ? "count" : "amount";
+                }} else {{
+                    radarMode = countryMode || "count";
+                }}
+                var maxVal = 0;
+                var values = [];
+                var totalVal = 0;
+                var sectors = [];
+                var isAmountMode = radarMode === "amount";
+                for (var i = 0; i < n; i++) {{
+                    var val = 0;
+                    if (countryData && countryData.per_sdg && countryData.per_sdg[i]) {{
+                        var sdgData = countryData.per_sdg[i];
+                        if (isAmountMode) {{
+                            val = (sdgData.total_amount_usd || 0) / 1e9;
+                        }} else {{
+                            val = sdgData.total_project_count || 0;
+                        }}
+                    }}
+                    values.push(val);
+                    totalVal += val;
+                    if (val > maxVal) maxVal = val;
+                }}
+                var hasData = maxVal > 0;
+                function niceTicks(maxVal) {{
+                    if (!(maxVal > 0)) return [0, 1];
+                    var d = Math.floor(Math.log10(maxVal));
+                    var scale = Math.pow(10, d);
+                    var leading = Math.ceil(maxVal / scale);
+                    var top = leading * scale;
+                    var step = top / 4;
+                    var ticks = [];
+                    for (var i = 0; i <= 4; i++) ticks.push(step * i);
+                    return ticks;
+                }}
+                var ticks = hasData ? niceTicks(maxVal) : [0, 1, 2, 3, 4];
+                var scaleMax = ticks[4] || 1;
+                var rMaxTickRef = hasData ? (rInner + (rOuter - rInner) * (ticks[3] / scaleMax)) : (rInner + (rOuter - rInner) * (3 / 4));
+                var newRInner = rInner;
+                var newROuter = rMaxTickRef;
+                var rotationOffset = Math.PI / 17;
+                var tickLabels = [];
+                for (var t = 0; t < ticks.length; t++) {{
+                    var tick = ticks[t];
+                    var rTick = newRInner + (newROuter - newRInner) * (t / (ticks.length - 1));
+                    tickLabels.push({{ r: rTick, value: tick }});
+                }}
+                ctx.clearRect(0, 0, size, size);
+                drawRingBackground();
+                ctx.strokeStyle = "#e5e7eb";
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                for (var t = 0; t < tickLabels.length; t++) {{
+                    var tickInfo = tickLabels[t];
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, tickInfo.r, 0, 2 * Math.PI);
+                    ctx.stroke();
+                }}
+                ctx.setLineDash([]);
+                if (hasData) {{
+                    ctx.fillStyle = "#6b7280";
+                    ctx.font = "600 12px 'Segoe UI', sans-serif";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "bottom";
+                    for (var t = 0; t < tickLabels.length; t++) {{
+                        var tickInfo = tickLabels[t];
+                        if (tickInfo.value === 0) continue;
+                        var labelText = isAmountMode ? tickInfo.value.toFixed(1) : Math.round(tickInfo.value).toString();
+                        ctx.fillText(labelText, cx, cy - tickInfo.r - 8);
+                    }}
+                }}
+                var hoveredSectorIndex = window.countryRadarHoveredSector ? window.countryRadarHoveredSector.i : null;
+                var selectedSectorIndex = window.countryRadarSelectedSector ? window.countryRadarSelectedSector.i : null;
+                ctx.shadowBlur = 0;
+                ctx.shadowColor = "transparent";
+                for (var i = 0; i < n; i++) {{
+                    var startAngle = -Math.PI / 2 + i * anglePer + gapAngle - rotationOffset;
+                    var endAngle = startAngle + sectorAngle;
+                    var midAngle = (startAngle + endAngle) / 2;
+                    var val = values[i];
+                    var ratio = hasData ? (val / maxVal) : 0;
+                    var rCurrent = newRInner + (newROuter - newRInner) * ratio;
+                    var color = window.SDG_COLORS[i] || "#475569";
+                    var baseColor = color;
+                    if (isAmountMode) {{
+                        color = color + "cc";
+                    }}
+                    if (!hasData) {{
+                        color = "#e2e8f0";
+                    }}
+                    var isHovered = hoveredSectorIndex === i;
+                    var isSelected = selectedSectorIndex === i;
+                    var needsEffect = isHovered || isSelected;
+                    sectors.push({{ i: i, startAngle: startAngle, endAngle: endAngle, midAngle: midAngle, rCurrent: rCurrent, value: val, color: color, isAmountMode: isAmountMode }});
+                    if (needsEffect) {{
+                        ctx.shadowBlur = 8;
+                        ctx.shadowColor = baseColor;
+                        var expandFactor = 1.05;
+                        var expandedRCurrent = rCurrent * expandFactor;
+                        if (expandedRCurrent > newROuter) expandedRCurrent = newROuter;
+                        ctx.beginPath();
+                        ctx.moveTo(cx + newRInner * Math.cos(startAngle), cy + newRInner * Math.sin(startAngle));
+                        ctx.arc(cx, cy, newRInner, startAngle, endAngle, false);
+                        ctx.lineTo(cx + expandedRCurrent * Math.cos(endAngle), cy + expandedRCurrent * Math.sin(endAngle));
+                        ctx.arc(cx, cy, expandedRCurrent, endAngle, startAngle, true);
+                        ctx.closePath();
+                        ctx.fillStyle = color;
+                        ctx.fill();
+                        ctx.shadowBlur = 0;
+                        ctx.shadowColor = "transparent";
+                    }} else {{
+                        ctx.beginPath();
+                        ctx.moveTo(cx + newRInner * Math.cos(startAngle), cy + newRInner * Math.sin(startAngle));
+                        ctx.arc(cx, cy, newRInner, startAngle, endAngle, false);
+                        ctx.lineTo(cx + rCurrent * Math.cos(endAngle), cy + rCurrent * Math.sin(endAngle));
+                        ctx.arc(cx, cy, rCurrent, endAngle, startAngle, true);
+                        ctx.closePath();
+                        ctx.fillStyle = color;
+                        ctx.fill();
+                    }}
+                }}
+                ctx.fillStyle = "#fff";
+                ctx.beginPath();
+                ctx.arc(cx, cy, newRInner, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                if (isAmountMode) {{
+                    var amountNum = hasData ? totalVal.toFixed(2) : "0.00";
+                    ctx.fillStyle = "#111827";
+                    ctx.font = "700 38px 'Segoe UI', sans-serif";
+                    ctx.fillText(amountNum, cx, cy - 20);
+                    ctx.font = "600 18px 'Segoe UI', sans-serif";
+                    ctx.fillStyle = "#6b7280";
+                    ctx.fillText("Billion USD", cx, cy + 14);
+                    ctx.font = "400 18px 'Segoe UI', sans-serif";
+                    ctx.fillText("Total Amount", cx, cy + 38);
+                }} else {{
+                    var countNum = hasData ? Math.round(totalVal).toString() : "0";
+                    ctx.fillStyle = "#111827";
+                    ctx.font = "700 38px 'Segoe UI', sans-serif";
+                    ctx.fillText(countNum, cx, cy - 10);
+                    ctx.font = "400 18px 'Segoe UI', sans-serif";
+                    ctx.fillStyle = "#6b7280";
+                    ctx.fillText("Total Project", cx, cy + 18);
+                }}
+                window.countryRadarSectors = sectors;
+                if (window.countryRadarHoveredSector === undefined) window.countryRadarHoveredSector = null;
+                if (window.countryRadarSelectedSector === undefined) window.countryRadarSelectedSector = null;
+                var tooltipEl = document.getElementById("country-radar-tooltip");
+                function drawRadarChartOnly() {{
+                    ctx.clearRect(0, 0, size, size);
+                    drawRingBackground();
+                    ctx.strokeStyle = "#e5e7eb";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([4, 4]);
+                    for (var t = 0; t < tickLabels.length; t++) {{
+                        var tickInfo = tickLabels[t];
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, tickInfo.r, 0, 2 * Math.PI);
+                        ctx.stroke();
+                    }}
+                    ctx.setLineDash([]);
+                    if (hasData) {{
+                        ctx.fillStyle = "#6b7280";
+                        ctx.font = "600 12px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "center";
+                        ctx.textBaseline = "bottom";
+                        for (var t = 0; t < tickLabels.length; t++) {{
+                            var tickInfo = tickLabels[t];
+                            if (tickInfo.value === 0) continue;
+                            var labelText = isAmountMode ? tickInfo.value.toFixed(1) : Math.round(tickInfo.value).toString();
+                            ctx.fillText(labelText, cx, cy - tickInfo.r - 8);
+                        }}
+                    }}
+                    var hoveredSectorIndex = window.countryRadarHoveredSector ? window.countryRadarHoveredSector.i : null;
+                    var selectedSectorIndex = window.countryRadarSelectedSector ? window.countryRadarSelectedSector.i : null;
+                    ctx.shadowBlur = 0;
+                    ctx.shadowColor = "transparent";
+                    for (var i = 0; i < n; i++) {{
+                        var startAngle = -Math.PI / 2 + i * anglePer + gapAngle - rotationOffset;
+                        var endAngle = startAngle + sectorAngle;
+                        var midAngle = (startAngle + endAngle) / 2;
+                        var val = values[i];
+                        var ratio = hasData ? (val / maxVal) : 0;
+                        var rCurrent = newRInner + (newROuter - newRInner) * ratio;
+                        var color = window.SDG_COLORS[i] || "#475569";
+                        var baseColor = color;
+                        if (isAmountMode) {{
+                            color = color + "cc";
+                        }}
+                        if (!hasData) {{
+                            color = "#e2e8f0";
+                        }}
+                        var isHovered = hoveredSectorIndex === i;
+                        var isSelected = selectedSectorIndex === i;
+                        var needsEffect = isHovered || isSelected;
+                        if (needsEffect) {{
+                            ctx.shadowBlur = 8;
+                            ctx.shadowColor = baseColor;
+                            var expandFactor = 1.05;
+                            var expandedRCurrent = rCurrent * expandFactor;
+                            if (expandedRCurrent > newROuter) expandedRCurrent = newROuter;
+                            ctx.beginPath();
+                            ctx.moveTo(cx + newRInner * Math.cos(startAngle), cy + newRInner * Math.sin(startAngle));
+                            ctx.arc(cx, cy, newRInner, startAngle, endAngle, false);
+                            ctx.lineTo(cx + expandedRCurrent * Math.cos(endAngle), cy + expandedRCurrent * Math.sin(endAngle));
+                            ctx.arc(cx, cy, expandedRCurrent, endAngle, startAngle, true);
+                            ctx.closePath();
+                            ctx.fillStyle = color;
+                            ctx.fill();
+                            ctx.shadowBlur = 0;
+                            ctx.shadowColor = "transparent";
+                        }} else {{
+                            ctx.beginPath();
+                            ctx.moveTo(cx + newRInner * Math.cos(startAngle), cy + newRInner * Math.sin(startAngle));
+                            ctx.arc(cx, cy, newRInner, startAngle, endAngle, false);
+                            ctx.lineTo(cx + rCurrent * Math.cos(endAngle), cy + rCurrent * Math.sin(endAngle));
+                            ctx.arc(cx, cy, rCurrent, endAngle, startAngle, true);
+                            ctx.closePath();
+                            ctx.fillStyle = color;
+                            ctx.fill();
+                        }}
+                    }}
+                    ctx.fillStyle = "#fff";
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, newRInner, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    if (isAmountMode) {{
+                        var amountNum = hasData ? totalVal.toFixed(2) : "0.00";
+                        ctx.fillStyle = "#111827";
+                        ctx.font = "700 38px 'Segoe UI', sans-serif";
+                        ctx.fillText(amountNum, cx, cy - 20);
+                        ctx.font = "600 18px 'Segoe UI', sans-serif";
+                        ctx.fillStyle = "#6b7280";
+                        ctx.fillText("Billion USD", cx, cy + 14);
+                        ctx.font = "400 18px 'Segoe UI', sans-serif";
+                        ctx.fillText("Total Amount", cx, cy + 38);
+                    }} else {{
+                        var countNum = hasData ? Math.round(totalVal).toString() : "0";
+                        ctx.fillStyle = "#111827";
+                        ctx.font = "700 38px 'Segoe UI', sans-serif";
+                        ctx.fillText(countNum, cx, cy - 10);
+                        ctx.font = "400 18px 'Segoe UI', sans-serif";
+                        ctx.fillStyle = "#6b7280";
+                        ctx.fillText("Total Project", cx, cy + 18);
+                    }}
+                }}
+                function updateRadarChart() {{
+                    if (typeof drawRadarChartOnly === "function") {{
+                        try {{ drawRadarChartOnly(); }} catch (e) {{ console.error("drawRadarChartOnly:", e); }}
+                    }}
+                }}
+                window.drawRadarChartOnly = drawRadarChartOnly;
+                function findSectorAtPoint(x, y) {{
+                    var dx = x - cx;
+                    var dy = y - cy;
+                    var dist = Math.sqrt(dx * dx + dy * dy);
+                    var angle = Math.atan2(dy, dx);
+                    for (var k = 0; k < sectors.length; k++) {{
+                        var s = sectors[k];
+                        var sectorStart = s.startAngle;
+                        var sectorEnd = s.endAngle;
+                        var angleNorm = angle;
+                        if (angleNorm < -Math.PI / 2) angleNorm += 2 * Math.PI;
+                        var startNorm = sectorStart;
+                        var endNorm = sectorEnd;
+                        if (startNorm < -Math.PI / 2) startNorm += 2 * Math.PI;
+                        if (endNorm < -Math.PI / 2) endNorm += 2 * Math.PI;
+                        var inAngle = false;
+                        if (startNorm <= endNorm) {{
+                            inAngle = angleNorm >= startNorm && angleNorm <= endNorm;
+                        }} else {{
+                            inAngle = angleNorm >= startNorm || angleNorm <= endNorm;
+                        }}
+                        if (inAngle && dist >= newRInner && dist <= s.rCurrent) {{
+                            return s;
+                        }}
+                    }}
+                    return null;
+                }}
+                function updateTooltip(hit, ev) {{
+                    if (!tooltipEl || !hit) {{
+                        if (tooltipEl && !window.countryRadarSelectedSector) tooltipEl.style.display = "none";
+                        return;
+                    }}
+                    var containerRect = canvas.closest(".country-radar-wrap").getBoundingClientRect();
+                    tooltipEl.style.display = "block";
+                    var dx, dy;
+                    if (ev) {{
+                        dx = ev.clientX - containerRect.left;
+                        dy = ev.clientY - containerRect.top;
+                    }} else {{
+                        var tooltipAngle = hit.midAngle;
+                        var tooltipR = (newRInner + hit.rCurrent) / 2;
+                        var tooltipX = cx + tooltipR * Math.cos(tooltipAngle);
+                        var tooltipY = cy + tooltipR * Math.sin(tooltipAngle);
+                        dx = tooltipX + containerRect.width / 2 - size / 2;
+                        dy = tooltipY + containerRect.height / 2 - size / 2;
+                    }}
+                    if (hit.isAmountMode) {{
+                        tooltipEl.innerHTML = "<strong>SDG " + (hit.i + 1) + "</strong><br/>Amount: " + hit.value.toFixed(2) + " B USD";
+                    }} else {{
+                        tooltipEl.innerHTML = "<strong>SDG " + (hit.i + 1) + "</strong><br/>Projects: " + Math.round(hit.value);
+                    }}
+                    positionTooltipInRect(tooltipEl, containerRect, dx, dy, 12);
+                }}
+                if (tooltipEl && sectors.length > 0) {{
+                    if (window.countryRadarMouseMoveHandler) {{
+                        canvas.removeEventListener("mousemove", window.countryRadarMouseMoveHandler);
+                    }}
+                    if (window.countryRadarMouseLeaveHandler) {{
+                        canvas.removeEventListener("mouseleave", window.countryRadarMouseLeaveHandler);
+                    }}
+                    if (window.countryRadarClickHandler) {{
+                        canvas.removeEventListener("click", window.countryRadarClickHandler);
+                    }}
+                    window.countryRadarMouseMoveHandler = function(ev) {{
+                        if (window.countryRadarSelectedSector) {{
+                            updateTooltip(window.countryRadarSelectedSector, null);
+                            return;
+                        }}
+                        var rect = canvas.getBoundingClientRect();
+                        var x = ev.clientX - rect.left;
+                        var y = ev.clientY - rect.top;
+                        var hit = findSectorAtPoint(x, y);
+                        var currentHoverIndex = window.countryRadarHoveredSector ? window.countryRadarHoveredSector.i : null;
+                        var newHoverIndex = hit ? hit.i : null;
+                        if (currentHoverIndex !== newHoverIndex) {{
+                            window.countryRadarHoveredSector = hit;
+                            updateRadarChart();
+                        }}
+                        updateTooltip(hit, ev);
+                    }};
+                    canvas.addEventListener("mousemove", window.countryRadarMouseMoveHandler);
+                    window.countryRadarMouseLeaveHandler = function() {{
+                        if (!window.countryRadarSelectedSector) {{
+                            window.countryRadarHoveredSector = null;
+                            if (tooltipEl) tooltipEl.style.display = "none";
+                            updateRadarChart();
+                        }}
+                    }};
+                    canvas.addEventListener("mouseleave", window.countryRadarMouseLeaveHandler);
+                    window.countryRadarClickHandler = function(ev) {{
+                        var rect = canvas.getBoundingClientRect();
+                        var x = ev.clientX - rect.left;
+                        var y = ev.clientY - rect.top;
+                        var hit = findSectorAtPoint(x, y);
+                        if (hit) {{
+                            window.countryRadarHoveredSector = null;
+                            if (window.countryRadarSelectedSector && window.countryRadarSelectedSector.i === hit.i) {{
+                                window.countryRadarSelectedSector = null;
+                                tooltipEl.style.display = "none";
+                            }} else {{
+                                window.countryRadarSelectedSector = hit;
+                                updateTooltip(hit, null);
+                            }}
+                            updateRadarChart();
+                        }}
+                    }};
+                    canvas.addEventListener("click", window.countryRadarClickHandler);
+                }}
+            }};
+
+            window.initCountryBarChart = function() {{
+                try {{
+                    var canvas = document.getElementById("country-barchart-canvas");
+                    if (!canvas) return;
+                    if (!window.COUNTRY_TOTALS) return;
+                    if (typeof getCountryByCountry !== "function") return;
+                    if (typeof getCountryRecord !== "function") return;
+                    var mdbIndex = countrySelectedMdbIndex || 0;
+                    var sdgIndex = countrySelectedSdgIndex || 0;
+                    var countryCode = selectedCountryCode || "";
+                    var countryName = (window.COUNTRY_NAMES && countryCode && window.COUNTRY_NAMES[countryCode]) ? window.COUNTRY_NAMES[countryCode] : (countryCode || "Selected Country");
+                    var titleEl = document.querySelector(".country-barchart-title-row .chart-title");
+                    if (titleEl) {{
+                        var titleText = "MDB Operations in " + countryName + " (2016-2025)";
+                        if (mdbIndex > 0 && window.MDB_NAMES && window.MDB_NAMES[mdbIndex - 1]) {{
+                            titleText = window.MDB_NAMES[mdbIndex - 1] + " Operations in " + countryName + " (2016-2025)";
+                        }}
+                        if (sdgIndex > 0 && sdgIndex <= 17) {{
+                            titleText += " related to SDG " + sdgIndex;
+                            if (window.SDG_GOAL_NAMES && window.SDG_GOAL_NAMES[sdgIndex - 1])
+                                titleText += " (" + window.SDG_GOAL_NAMES[sdgIndex - 1] + ")";
+                        }}
+                        titleEl.textContent = titleText;
+                    }}
+                    var countryBarchartBackBtn = document.getElementById("country-barchart-back-btn");
+                    if (countryBarchartBackBtn) countryBarchartBackBtn.classList.toggle("visible", mdbIndex > 0);
+                    var container = canvas.parentElement;
+                    if (!container) return;
+                    var containerRect = container.getBoundingClientRect();
+                    var w = Math.floor(containerRect.width) || 1400;
+                    var h = Math.floor(containerRect.height) || 760;
+                    if (w <= 0 || h <= 0) return;
+                    canvas.width = w;
+                    canvas.height = h;
+                    var ctx = canvas.getContext("2d");
+                    if (!ctx) return;
+                    if (window.countryBarChartMouseMoveHandler) {{
+                        canvas.removeEventListener("mousemove", window.countryBarChartMouseMoveHandler);
+                        window.countryBarChartMouseMoveHandler = null;
+                    }}
+                    if (window.countryBarChartMouseLeaveHandler) {{
+                        canvas.removeEventListener("mouseleave", window.countryBarChartMouseLeaveHandler);
+                        window.countryBarChartMouseLeaveHandler = null;
+                    }}
+                    var tooltipElReset = document.getElementById("country-barchart-tooltip");
+                    if (tooltipElReset) tooltipElReset.style.display = "none";
+                    var years = [2016,2017,2018,2019,2020,2021,2022,2023,2024,2025];
+                    var counts = [];
+                    var amounts = [];
+                    var maxCount = 0;
+                    var maxAmount = 0;
+                    var byCountry = getCountryByCountry(window.COUNTRY_TOTALS, mdbIndex);
+                    var countryData = byCountry && countryCode ? byCountry[countryCode] : null;
+                    var countryRecord = countryData ? getCountryRecord(countryData) : null;
+                    var perYear = (countryRecord && countryRecord.per_year) ? countryRecord.per_year : {{}};
+                    for (var i = 0; i < years.length; i++) {{
+                        var y = String(years[i]);
+                        var bucket = perYear[y];
+                        var count = (bucket && bucket.project_count) || 0;
+                        var amount = (bucket && bucket.amount_usd) || 0;
+                        counts.push(count);
+                        amounts.push(amount / 1e9);
+                        if (count > maxCount) maxCount = count;
+                        if (amount / 1e9 > maxAmount) maxAmount = amount / 1e9;
+                    }}
+                    var hasData = maxCount > 0 || maxAmount > 0;
+                    document.querySelectorAll("#country-panel .map-sdg-logo-wrap").forEach(function(w) {{
+                        var wIdx = parseInt(w.getAttribute("data-sdg-index"), 10);
+                        w.classList.toggle("selected", wIdx === sdgIndex);
+                    }});
+                    var countColor = "#475569";
+                    var amountColor = "#64748b";
+                    if (sdgIndex > 0 && sdgIndex <= 17 && window.SDG_COLORS && window.SDG_COLORS[sdgIndex - 1]) {{
+                        var sdgColor = window.SDG_COLORS[sdgIndex - 1];
+                        countColor = sdgColor;
+                        amountColor = sdgColor + "cc";
+                    }}
+                    var sidePadding = 72;
+                    var timeAxisInset = 50;
+                    var yearRowLeft = sidePadding + timeAxisInset;
+                    var yearRowRight = w - sidePadding - timeAxisInset;
+                    var availableWidth = yearRowRight - yearRowLeft;
+                    var yearRowHeight = 52;
+                    var axisGap = 40;
+                    var timeAxisY = Math.floor(h / 2);
+                    var yearRowTop = timeAxisY - Math.floor(yearRowHeight / 2);
+                    var yearRowBottom = timeAxisY + Math.ceil(yearRowHeight / 2);
+                    var chartTop = axisGap;
+                    var chartBottom = timeAxisY - Math.floor(yearRowHeight / 2) - 20;
+                    var chartHeight = chartBottom - chartTop;
+                    if (chartHeight <= 0) return;
+                    var gap = 38;
+                    var barPairGap = 8;
+                    var barWidth = (availableWidth - gap * (years.length - 1) - barPairGap * years.length) / (years.length * 2);
+                    if (barWidth < 2) barWidth = 2;
+                    ctx.clearRect(0, 0, w, h);
+                    ctx.fillStyle = "#fafafa";
+                    ctx.fillRect(0, 0, w, h);
+                    function niceTicks(maxVal) {{
+                        if (!(maxVal > 0)) return [0, 1];
+                        var d = Math.floor(Math.log10(maxVal));
+                        var scale = Math.pow(10, d);
+                        var leading = Math.ceil(maxVal / scale);
+                        var top = leading * scale;
+                        var step = top / 4;
+                        var ticks = [];
+                        for (var i = 0; i <= 4; i++) ticks.push(step * i);
+                        return ticks;
+                    }}
+                    var countTicks;
+                    var scaleMaxCount;
+                    var amountTicks;
+                    var scaleMaxAmount;
+                    if (hasData) {{
+                        if (maxCount > 0 && maxCount < 4) {{
+                            countTicks = [0, 1, 2, 3, 4];
+                            scaleMaxCount = 4;
+                        }} else {{
+                            countTicks = niceTicks(maxCount);
+                            scaleMaxCount = countTicks[4] || 1;
+                        }}
+                        if (maxAmount > 0 && maxAmount < 1.2) {{
+                            amountTicks = [0, 0.3, 0.6, 0.9, 1.2];
+                            scaleMaxAmount = 1.2;
+                        }} else {{
+                            amountTicks = niceTicks(maxAmount);
+                            scaleMaxAmount = amountTicks[4] || 1;
+                        }}
+                        ctx.strokeStyle = "#e5e7eb";
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4, 4]);
+                        countTicks.forEach(function(tick) {{
+                            var ratio = tick / scaleMaxCount;
+                            var y = chartBottom - ratio * chartHeight;
+                            ctx.beginPath();
+                            ctx.moveTo(yearRowLeft, y);
+                            ctx.lineTo(yearRowRight, y);
+                            ctx.stroke();
+                        }});
+                        amountTicks.forEach(function(tick) {{
+                            var ratio = tick / scaleMaxAmount;
+                            var y = chartBottom - ratio * chartHeight;
+                            ctx.beginPath();
+                            ctx.moveTo(yearRowLeft, y);
+                            ctx.lineTo(yearRowRight, y);
+                            ctx.stroke();
+                        }});
+                        ctx.setLineDash([]);
+                        ctx.fillStyle = "#111827";
+                        ctx.font = "600 14px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "right";
+                        ctx.textBaseline = "middle";
+                        countTicks.forEach(function(tick) {{
+                            var ratio = tick / scaleMaxCount;
+                            var y = chartBottom - ratio * chartHeight;
+                            ctx.fillText(String(Math.round(tick)), yearRowLeft - 10, y);
+                        }});
+                        ctx.textAlign = "left";
+                        amountTicks.forEach(function(tick) {{
+                            var ratio = tick / scaleMaxAmount;
+                            var y = chartBottom - ratio * chartHeight;
+                            ctx.fillText(tick.toFixed(1) + " B", yearRowRight + 10, y);
+                        }});
+                        ctx.font = "600 15px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "left";
+                        ctx.textBaseline = "bottom";
+                        ctx.fillText("Number of projects", 8, chartTop - 16);
+                        ctx.textAlign = "right";
+                        ctx.textBaseline = "bottom";
+                        ctx.fillText("USD (in billion)", w - 8, chartTop - 16);
+                    }} else {{
+                        countTicks = [0, 1, 2, 3, 4];
+                        scaleMaxCount = 4;
+                        amountTicks = [0, 0.3, 0.6, 0.9, 1.2];
+                        scaleMaxAmount = 1.2;
+                        ctx.strokeStyle = "#e5e7eb";
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4, 4]);
+                        countTicks.forEach(function(tick) {{
+                            var ratio = tick / scaleMaxCount;
+                            var y = chartBottom - ratio * chartHeight;
+                            ctx.beginPath();
+                            ctx.moveTo(yearRowLeft, y);
+                            ctx.lineTo(yearRowRight, y);
+                            ctx.stroke();
+                        }});
+                        amountTicks.forEach(function(tick) {{
+                            var ratio = tick / scaleMaxAmount;
+                            var y = chartBottom - ratio * chartHeight;
+                            ctx.beginPath();
+                            ctx.moveTo(yearRowLeft, y);
+                            ctx.lineTo(yearRowRight, y);
+                            ctx.stroke();
+                        }});
+                        ctx.setLineDash([]);
+                        ctx.fillStyle = "#111827";
+                        ctx.font = "600 14px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "right";
+                        ctx.textBaseline = "middle";
+                        countTicks.forEach(function(tick) {{
+                            var ratio = tick / scaleMaxCount;
+                            var y = chartBottom - ratio * chartHeight;
+                            ctx.fillText(String(Math.round(tick)), yearRowLeft - 10, y);
+                        }});
+                        ctx.textAlign = "left";
+                        amountTicks.forEach(function(tick) {{
+                            var ratio = tick / scaleMaxAmount;
+                            var y = chartBottom - ratio * chartHeight;
+                            ctx.fillText(tick.toFixed(1) + " B", yearRowRight + 10, y);
+                        }});
+                        ctx.font = "600 15px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "left";
+                        ctx.textBaseline = "bottom";
+                        ctx.fillText("Number of projects", 8, chartTop - 16);
+                        ctx.textAlign = "right";
+                        ctx.textBaseline = "bottom";
+                        ctx.fillText("USD (in billion)", w - 8, chartTop - 16);
+                    }}
+                    var bars = [];
+                    if (hasData) {{
+                        for (var i = 0; i < years.length; i++) {{
+                            var count = counts[i];
+                            var amount = amounts[i];
+                            var baseX = yearRowLeft + i * (gap + barWidth * 2 + barPairGap);
+                            var countBarX = baseX;
+                            var amountBarX = baseX + barWidth + barPairGap;
+                            var cx = baseX + barWidth + barPairGap / 2;
+                            var countBarH = (count / scaleMaxCount) * chartHeight;
+                            var amountBarH = (amount / scaleMaxAmount) * chartHeight;
+                            if (countBarH < 0.5 && count > 0) countBarH = 0.5;
+                            if (amountBarH < 0.5 && amount > 0) amountBarH = 0.5;
+                            var countBarY = chartBottom - countBarH;
+                            var amountBarY = chartBottom - amountBarH;
+                            bars.push({{ type: "count", year: years[i], x: countBarX, y: countBarY, w: barWidth, h: countBarH, value: count }});
+                            bars.push({{ type: "amount", year: years[i], x: amountBarX, y: amountBarY, w: barWidth, h: amountBarH, value: amount }});
+                            ctx.fillStyle = countColor;
+                            ctx.fillRect(countBarX, countBarY, barWidth, countBarH);
+                            ctx.fillStyle = amountColor;
+                            ctx.fillRect(amountBarX, amountBarY, barWidth, amountBarH);
+                        }}
+                    }}
+                    var midGrad = ctx.createLinearGradient(0, yearRowTop, 0, yearRowBottom);
+                    midGrad.addColorStop(0, "#f1f5f9");
+                    midGrad.addColorStop(0.5, "#e2e8f0");
+                    midGrad.addColorStop(1, "#f1f5f9");
+                    ctx.fillStyle = midGrad;
+                    ctx.beginPath();
+                    ctx.rect(yearRowLeft, yearRowTop, availableWidth, yearRowHeight);
+                    ctx.fill();
+                    ctx.strokeStyle = "#cbd5e1";
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                    ctx.fillStyle = "#334155";
+                    ctx.font = "700 16px 'Segoe UI', sans-serif";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    for (var i = 0; i < years.length; i++) {{
+                        var baseX = yearRowLeft + i * (gap + barWidth * 2 + barPairGap);
+                        var cx = baseX + barWidth + barPairGap / 2;
+                        ctx.fillText(String(years[i]), cx, timeAxisY);
+                    }}
+                    var lineChartPoints = [];
+                    var sdgIndexData = null;
+                    if (countryCode && window.SDG_INDEX && window.SDG_INDEX.countries && window.SDG_INDEX.countries[countryCode]) {{
+                        sdgIndexData = window.SDG_INDEX.countries[countryCode];
+                    }}
+                    var lineChartTop = yearRowBottom + 20;
+                    var lineChartBottom = h - axisGap;
+                    var lineChartHeight = lineChartBottom - lineChartTop;
+                    var hasLineChartArea = (lineChartHeight > 40);
+                    if (hasLineChartArea) {{
+                        var useSdgSpecific = (countrySelectedSdgIndex >= 1 && countrySelectedSdgIndex <= 17);
+                        var sdgKey = useSdgSpecific ? ("SDG" + countrySelectedSdgIndex) : null;
+                        var lineColor = useSdgSpecific && window.SDG_COLORS && window.SDG_COLORS[countrySelectedSdgIndex - 1] ? window.SDG_COLORS[countrySelectedSdgIndex - 1] : "#64748b";
+                        var axisLabel = useSdgSpecific ? ("SDG " + countrySelectedSdgIndex + " Score") : "SDG Index Score";
+                        var yTicks = [0, 25, 50, 75, 100];
+                        var yScale = 100;
+                        ctx.strokeStyle = "#e5e7eb";
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4, 4]);
+                        for (var ti = 0; ti < yTicks.length; ti++) {{
+                            var tick = yTicks[ti];
+                            var ratio = tick / yScale;
+                            var ly = lineChartTop + ratio * lineChartHeight;
+                            ctx.beginPath();
+                            ctx.moveTo(yearRowLeft, ly);
+                            ctx.lineTo(yearRowRight, ly);
+                            ctx.stroke();
+                        }}
+                        ctx.setLineDash([]);
+                        ctx.fillStyle = "#111827";
+                        ctx.font = "600 14px 'Segoe UI', sans-serif";
+                        ctx.textAlign = "left";
+                        ctx.textBaseline = "middle";
+                        for (var ti = 0; ti < yTicks.length; ti++) {{
+                            var tick = yTicks[ti];
+                            var ly = lineChartTop + (tick / yScale) * lineChartHeight;
+                            ctx.fillText(String(tick), yearRowRight + 12, ly);
+                        }}
+                        ctx.textAlign = "right";
+                        ctx.textBaseline = "top";
+                        ctx.font = "600 15px 'Segoe UI', sans-serif";
+                        ctx.fillText(axisLabel, w - 8, lineChartTop + lineChartHeight + 16);
+                        if (sdgIndexData && sdgIndexData.years) {{
+                            var yearToData = {{}};
+                            for (var yi = 0; yi < sdgIndexData.years.length; yi++) {{
+                                var yr = sdgIndexData.years[yi];
+                                if (yr && yr.year != null) yearToData[yr.year] = yr;
+                            }}
+                            var validPoints = [];
+                            for (var i = 0; i < years.length; i++) {{
+                                var yrData = yearToData[years[i]];
+                                if (!yrData) continue;
+                                var score = null;
+                                if (useSdgSpecific && yrData.sdg_scores && sdgKey) {{
+                                    score = yrData.sdg_scores[sdgKey];
+                                }} else {{
+                                    score = yrData.sdg_index_score;
+                                }}
+                                if (score != null && score !== undefined) {{
+                                    var baseX = yearRowLeft + i * (gap + barWidth * 2 + barPairGap);
+                                    var cx = baseX + barWidth + barPairGap / 2;
+                                    var ly = lineChartTop + (score / yScale) * lineChartHeight;
+                                    validPoints.push({{ year: years[i], x: cx, y: ly, score: score }});
+                                }}
+                            }}
+                            if (validPoints.length > 0) {{
+                                lineChartPoints = validPoints;
+                                ctx.strokeStyle = lineColor;
+                                ctx.lineWidth = 4;
+                                ctx.lineCap = "round";
+                                ctx.lineJoin = "round";
+                                ctx.beginPath();
+                                ctx.moveTo(validPoints[0].x, validPoints[0].y);
+                                for (var pi = 1; pi < validPoints.length; pi++) {{
+                                    ctx.lineTo(validPoints[pi].x, validPoints[pi].y);
+                                }}
+                                ctx.stroke();
+                                ctx.fillStyle = "#fafafa";
+                                ctx.strokeStyle = lineColor;
+                                ctx.lineWidth = 3;
+                                for (var pi = 0; pi < validPoints.length; pi++) {{
+                                    var p = validPoints[pi];
+                                    ctx.beginPath();
+                                    ctx.arc(p.x, p.y, 8, 0, 2 * Math.PI);
+                                    ctx.fill();
+                                    ctx.stroke();
+                                }}
+                            }}
+                        }}
+                    }}
+                    var tooltipEl = document.getElementById("country-barchart-tooltip");
+                    var hasLineChartArea = (lineChartHeight > 40);
+                    if (tooltipEl && (hasData && bars && bars.length > 0 || hasLineChartArea)) {{
+                        var hoveredBar = null;
+                        var hoveredLinePoint = null;
+                        function drawFrame() {{
+                            ctx.clearRect(0, 0, w, h);
+                            ctx.fillStyle = "#fafafa";
+                            ctx.fillRect(0, 0, w, h);
+                            ctx.strokeStyle = "#e5e7eb";
+                            ctx.lineWidth = 1;
+                            ctx.setLineDash([4, 4]);
+                            countTicks.forEach(function(tick) {{
+                                var ratio = tick / scaleMaxCount;
+                                var y = chartBottom - ratio * chartHeight;
+                                ctx.beginPath();
+                                ctx.moveTo(yearRowLeft, y);
+                                ctx.lineTo(yearRowRight, y);
+                                ctx.stroke();
+                            }});
+                            amountTicks.forEach(function(tick) {{
+                                var ratio = tick / scaleMaxAmount;
+                                var y = chartBottom - ratio * chartHeight;
+                                ctx.beginPath();
+                                ctx.moveTo(yearRowLeft, y);
+                                ctx.lineTo(yearRowRight, y);
+                                ctx.stroke();
+                            }});
+                            ctx.setLineDash([]);
+                            ctx.fillStyle = "#111827";
+                            ctx.font = "600 14px 'Segoe UI', sans-serif";
+                            ctx.textAlign = "right";
+                            ctx.textBaseline = "middle";
+                            countTicks.forEach(function(tick) {{
+                                var ratio = tick / scaleMaxCount;
+                                var y = chartBottom - ratio * chartHeight;
+                                ctx.fillText(String(Math.round(tick)), yearRowLeft - 10, y);
+                            }});
+                            ctx.textAlign = "left";
+                            amountTicks.forEach(function(tick) {{
+                                var ratio = tick / scaleMaxAmount;
+                                var y = chartBottom - ratio * chartHeight;
+                                ctx.fillText(tick.toFixed(1) + " B", yearRowRight + 10, y);
+                            }});
+                            ctx.font = "600 15px 'Segoe UI', sans-serif";
+                            ctx.textAlign = "left";
+                            ctx.textBaseline = "bottom";
+                            ctx.fillText("Number of projects", 8, chartTop - 16);
+                            ctx.textAlign = "right";
+                            ctx.textBaseline = "bottom";
+                            ctx.fillText("USD (in billion)", w - 8, chartTop - 16);
+                            ctx.fillStyle = midGrad;
+                            ctx.beginPath();
+                            ctx.rect(yearRowLeft, yearRowTop, availableWidth, yearRowHeight);
+                            ctx.fill();
+                            ctx.strokeStyle = "#cbd5e1";
+                            ctx.lineWidth = 1;
+                            ctx.stroke();
+                            ctx.fillStyle = "#334155";
+                            ctx.font = "700 16px 'Segoe UI', sans-serif";
+                            ctx.textAlign = "center";
+                            ctx.textBaseline = "middle";
+                            for (var i = 0; i < years.length; i++) {{
+                                var baseX = yearRowLeft + i * (gap + barWidth * 2 + barPairGap);
+                                var cx = baseX + barWidth + barPairGap / 2;
+                                ctx.fillText(String(years[i]), cx, timeAxisY);
+                            }}
+                            if (hasData) {{
+                                for (var i = 0; i < years.length; i++) {{
+                                    var count = counts[i];
+                                    var amount = amounts[i];
+                                    var baseX = yearRowLeft + i * (gap + barWidth * 2 + barPairGap);
+                                    var countBarX = baseX;
+                                    var amountBarX = baseX + barWidth + barPairGap;
+                                    var cx = baseX + barWidth + barPairGap / 2;
+                                    var countBarH = (count / scaleMaxCount) * chartHeight;
+                                    var amountBarH = (amount / scaleMaxAmount) * chartHeight;
+                                    if (countBarH < 0.5 && count > 0) countBarH = 0.5;
+                                    if (amountBarH < 0.5 && amount > 0) amountBarH = 0.5;
+                                    var countBarY = chartBottom - countBarH;
+                                    var amountBarY = chartBottom - amountBarH;
+                                    var isHoverCount = hoveredBar && hoveredBar.type === "count" && hoveredBar.year === years[i];
+                                    var isHoverAmount = hoveredBar && hoveredBar.type === "amount" && hoveredBar.year === years[i];
+                                    ctx.fillStyle = countColor;
+                                    ctx.fillRect(countBarX, countBarY, barWidth, countBarH);
+                                    if (isHoverCount) {{
+                                        ctx.strokeStyle = "#111827";
+                                        ctx.lineWidth = 2;
+                                        ctx.strokeRect(countBarX, countBarY, barWidth, countBarH);
+                                        ctx.lineWidth = 1;
+                                    }}
+                                    ctx.fillStyle = amountColor;
+                                    ctx.fillRect(amountBarX, amountBarY, barWidth, amountBarH);
+                                    if (isHoverAmount) {{
+                                        ctx.strokeStyle = "#111827";
+                                        ctx.lineWidth = 2;
+                                        ctx.strokeRect(amountBarX, amountBarY, barWidth, amountBarH);
+                                        ctx.lineWidth = 1;
+                                    }}
+                                }}
+                            }}
+                            var drawLineChartTop = yearRowBottom + 20;
+                            var drawLineChartBottom = h - axisGap;
+                            var drawLineChartHeight = drawLineChartBottom - drawLineChartTop;
+                            if (drawLineChartHeight > 40) {{
+                                var useSdgSpecific = (countrySelectedSdgIndex >= 1 && countrySelectedSdgIndex <= 17);
+                                var lineColor = useSdgSpecific && window.SDG_COLORS && window.SDG_COLORS[countrySelectedSdgIndex - 1] ? window.SDG_COLORS[countrySelectedSdgIndex - 1] : "#64748b";
+                                var axisLabel = useSdgSpecific ? ("SDG " + countrySelectedSdgIndex + " Score") : "SDG Index Score";
+                                var yTicks = [0, 25, 50, 75, 100];
+                                var yScale = 100;
+                                ctx.strokeStyle = "#e5e7eb";
+                                ctx.lineWidth = 1;
+                                ctx.setLineDash([4, 4]);
+                                for (var ti = 0; ti < yTicks.length; ti++) {{
+                                    var tick = yTicks[ti];
+                                    var ly = drawLineChartTop + (tick / yScale) * drawLineChartHeight;
+                                    ctx.beginPath();
+                                    ctx.moveTo(yearRowLeft, ly);
+                                    ctx.lineTo(yearRowRight, ly);
+                                    ctx.stroke();
+                                }}
+                                ctx.setLineDash([]);
+                                ctx.fillStyle = "#111827";
+                                ctx.font = "600 14px 'Segoe UI', sans-serif";
+                                ctx.textAlign = "left";
+                                ctx.textBaseline = "middle";
+                                for (var ti = 0; ti < yTicks.length; ti++) {{
+                                    var tick = yTicks[ti];
+                                    var ly = drawLineChartTop + (tick / yScale) * drawLineChartHeight;
+                                    ctx.fillText(String(tick), yearRowRight + 12, ly);
+                                }}
+                                ctx.textAlign = "right";
+                                ctx.textBaseline = "top";
+                                ctx.font = "600 15px 'Segoe UI', sans-serif";
+                                ctx.fillText(axisLabel, w - 8, drawLineChartTop + drawLineChartHeight + 16);
+                                if (lineChartPoints.length > 0) {{
+                                    ctx.strokeStyle = lineColor;
+                                    ctx.lineWidth = 4;
+                                    ctx.lineCap = "round";
+                                    ctx.lineJoin = "round";
+                                    ctx.beginPath();
+                                    ctx.moveTo(lineChartPoints[0].x, lineChartPoints[0].y);
+                                    for (var pi = 1; pi < lineChartPoints.length; pi++) {{
+                                        ctx.lineTo(lineChartPoints[pi].x, lineChartPoints[pi].y);
+                                    }}
+                                    ctx.stroke();
+                                    ctx.fillStyle = "#fafafa";
+                                    ctx.strokeStyle = lineColor;
+                                    ctx.lineWidth = 3;
+                                    for (var pi = 0; pi < lineChartPoints.length; pi++) {{
+                                        var p = lineChartPoints[pi];
+                                        var isHovered = hoveredLinePoint && hoveredLinePoint.year === p.year;
+                                        var radius = isHovered ? 10 : 8;
+                                        ctx.beginPath();
+                                        ctx.arc(p.x, p.y, radius, 0, 2 * Math.PI);
+                                        ctx.fill();
+                                        ctx.stroke();
+                                    }}
+                                }}
+                            }}
+                        }}
+                        drawFrame();
+                        window.countryBarChartMouseMoveHandler = function(ev) {{
+                            var rect = canvas.getBoundingClientRect();
+                            var x = ev.clientX - rect.left;
+                            var y = ev.clientY - rect.top;
+                            var hitBar = null;
+                            var hitLine = null;
+                            for (var k = 0; k < bars.length; k++) {{
+                                var b = bars[k];
+                                if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h && b.h > 1) {{
+                                    hitBar = b;
+                                    break;
+                                }}
+                            }}
+                            if (lineChartPoints.length > 0) {{
+                                var minDist = 24;
+                                for (var k = 0; k < lineChartPoints.length; k++) {{
+                                    var p = lineChartPoints[k];
+                                    var dx = x - p.x;
+                                    var dy = y - p.y;
+                                    var dist = Math.sqrt(dx * dx + dy * dy);
+                                    if (dist < minDist) {{ minDist = dist; hitLine = p; }}
+                                }}
+                            }}
+                            var hit = hitBar || hitLine;
+                            if (hoveredBar !== hitBar || hoveredLinePoint !== hitLine) {{
+                                hoveredBar = hitBar;
+                                hoveredLinePoint = hitLine;
+                                drawFrame();
+                            }}
+                            if (!hit) {{
+                                tooltipEl.style.display = "none";
+                                return;
+                            }}
+                            var containerRect = container.getBoundingClientRect();
+                            tooltipEl.style.display = "block";
+                            if (hit.year != null && hit.score != null) {{
+                                var useSdgSpecific = (countrySelectedSdgIndex >= 1 && countrySelectedSdgIndex <= 17);
+                                var scoreLabel = useSdgSpecific ? ("SDG " + countrySelectedSdgIndex + " Score") : "SDG Index Score";
+                                tooltipEl.innerHTML = "<strong>" + hit.year + "</strong><br/>" + scoreLabel + ": " + hit.score.toFixed(2);
+                            }} else {{
+                                var label = hit.type === "count" ? "Projects" : "Amount";
+                                var value = hit.type === "count" ? Math.round(hit.value) : hit.value.toFixed(2) + " B USD";
+                                tooltipEl.innerHTML = "<strong>" + hit.year + " · " + label + "</strong><br/>" + value;
+                            }}
+                            positionTooltipInRect(
+                                tooltipEl,
+                                containerRect,
+                                ev.clientX - containerRect.left,
+                                ev.clientY - containerRect.top,
+                                12
+                            );
+                        }};
+                        canvas.addEventListener("mousemove", window.countryBarChartMouseMoveHandler);
+                        window.countryBarChartMouseLeaveHandler = function() {{
+                            hoveredBar = null;
+                            hoveredLinePoint = null;
+                            tooltipEl.style.display = "none";
+                            drawFrame();
+                        }};
+                        canvas.addEventListener("mouseleave", window.countryBarChartMouseLeaveHandler);
+                    }}
+                }} catch (e) {{
+                    console.error("Error in initCountryBarChart:", e);
+                }}
+            }};
+            var sdgLogosContainer = document.querySelector("#country-panel .map-wrapper-sdg-logos");
+            if (sdgLogosContainer) {{
+                sdgLogosContainer.addEventListener("click", function(ev) {{
+                    var wrap = ev.target.closest(".map-sdg-logo-wrap");
+                    if (!wrap) return;
+                    var idx = parseInt(wrap.getAttribute("data-sdg-index"), 10);
+                    if (isNaN(idx)) return;
+                    countrySelectedSdgIndex = idx;
+                    document.querySelectorAll("#country-panel .map-sdg-logo-wrap").forEach(function(w) {{
+                        w.classList.toggle("selected", parseInt(w.getAttribute("data-sdg-index"), 10) === idx);
+                    }});
+                    if (countrySlideIndex === 2) {{
+                        if (idx === 0) {{
+                            window.countryRadarSelectedSector = null;
+                            window.countryRadarHoveredSector = null;
+                            var tooltipEl = document.getElementById("country-radar-tooltip");
+                            if (tooltipEl) tooltipEl.style.display = "none";
+                            if (typeof window.initCountryRadarRing === "function") {{
+                                try {{
+                                    window.initCountryRadarRing();
+                                }} catch (e) {{
+                                    console.error("Error updating country radar chart:", e);
+                                }}
+                            }}
+                        }} else if (window.countryRadarSectors && idx >= 1 && idx <= 17) {{
+                            var sector = window.countryRadarSectors[idx - 1];
+                            if (sector) {{
+                                window.countryRadarHoveredSector = null;
+                                if (window.countryRadarSelectedSector && window.countryRadarSelectedSector.i === sector.i) {{
+                                    window.countryRadarSelectedSector = null;
+                                    var tooltipEl = document.getElementById("country-radar-tooltip");
+                                    if (tooltipEl) tooltipEl.style.display = "none";
+                                }} else {{
+                                    window.countryRadarSelectedSector = sector;
+                                    var tooltipEl = document.getElementById("country-radar-tooltip");
+                                    if (tooltipEl && sector) {{
+                                        var canvas = document.getElementById("country-radar-ring-canvas");
+                                        if (canvas) {{
+                                            var containerRect = canvas.closest(".country-radar-wrap").getBoundingClientRect();
+                                            var dpr = window.devicePixelRatio || 1;
+                                            var size = canvas.width / dpr;
+                                            var cx = size / 2;
+                                            var cy = size / 2;
+                                            var tooltipAngle = sector.midAngle;
+                                            var rInner = size * 0.12;
+                                            var tooltipR = (rInner + sector.rCurrent) / 2;
+                                            var tooltipX = cx + tooltipR * Math.cos(tooltipAngle);
+                                            var tooltipY = cy + tooltipR * Math.sin(tooltipAngle);
+                                            tooltipEl.style.display = "block";
+                                            tooltipEl.style.left = (tooltipX + containerRect.width / 2 - size / 2 + 14) + "px";
+                                            tooltipEl.style.top = (tooltipY + containerRect.height / 2 - size / 2 + 10) + "px";
+                                            if (sector.isAmountMode) {{
+                                                tooltipEl.innerHTML = "<strong>SDG " + (sector.i + 1) + "</strong><br/>Amount: " + sector.value.toFixed(2) + " B USD";
+                                            }} else {{
+                                                tooltipEl.innerHTML = "<strong>SDG " + (sector.i + 1) + "</strong><br/>Projects: " + Math.round(sector.value);
+                                            }}
+                                        }}
+                                    }}
+                                }}
+                                if (typeof window.drawRadarChartOnly === "function") {{
+                                    try {{
+                                        window.drawRadarChartOnly();
+                                    }} catch (e) {{
+                                        console.error("Error updating country radar chart:", e);
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }} else if (countrySlideIndex === 3) {{
+                        if (typeof window.initCountryBarChart === "function") {{
+                            try {{
+                                window.initCountryBarChart();
+                            }} catch (e) {{
+                                console.error("Error updating country bar chart:", e);
+                            }}
+                        }}
+                    }} else {{
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }}
+                }});
+            }}
+            var switchWrap = document.getElementById("map-metric-switch");
+            var trackEl = document.getElementById("map-switch-track");
+            var labelLeft = document.getElementById("map-metric-label-left");
+            var labelRight = document.getElementById("map-metric-label-right");
+            if (trackEl) {{
+                trackEl.addEventListener("click", function() {{
+                    countryMode = countryMode === "count" ? "amount" : "count";
+                    var isCount = countryMode === "count";
+                    trackEl.classList.toggle("on", isCount);
+                    if (switchWrap) switchWrap.setAttribute("aria-checked", isCount ? "true" : "false");
+                    if (labelLeft) {{ labelLeft.classList.toggle("active", isCount); labelLeft.textContent = "Project count"; }}
+                    if (labelRight) {{ labelRight.classList.toggle("active", !isCount); labelRight.textContent = "Amount (B USD)"; }}
+                    if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
+                    if (typeof window.initCountryMap === "function") window.initCountryMap();
+                }});
+            }}
+            var radarSwitchWrap = document.getElementById("radar-metric-switch");
+            var radarTrackEl = document.getElementById("radar-switch-track");
+            var radarLabelLeft = document.getElementById("radar-metric-label-left");
+            var radarLabelRight = document.getElementById("radar-metric-label-right");
+            if (radarTrackEl) {{
+                radarTrackEl.addEventListener("click", function() {{
+                    var isCount = !radarTrackEl.classList.contains("on");
+                    radarTrackEl.classList.toggle("on", isCount);
+                    if (radarSwitchWrap) radarSwitchWrap.setAttribute("aria-checked", isCount ? "true" : "false");
+                    if (radarLabelLeft) {{ radarLabelLeft.classList.toggle("active", isCount); radarLabelLeft.textContent = "Project count"; }}
+                    if (radarLabelRight) {{ radarLabelRight.classList.toggle("active", !isCount); radarLabelRight.textContent = "Amount (B USD)"; }}
+                    if (typeof syncMapSwitchFromRadar === "function") syncMapSwitchFromRadar();
+                    window.countryRadarSelectedSector = null;
+                    var tooltipEl = document.getElementById("country-radar-tooltip");
+                    if (tooltipEl) tooltipEl.style.display = "none";
+                    if (typeof window.initCountryRadarRing === "function") {{
+                        try {{ window.initCountryRadarRing(); }} catch (e) {{ console.error("initCountryRadarRing:", e); }}
+                    }}
+                }});
+            }}
+            var countryRadarBackBtn = document.getElementById("country-radar-back-btn");
+            if (countryRadarBackBtn) {{
+                countryRadarBackBtn.addEventListener("click", function() {{
+                    countrySelectedMdbIndex = 0;
+                    var mdbButtons = document.querySelectorAll("#country-panel .mdb-button");
+                    mdbButtons.forEach(function(b) {{ b.classList.remove("selected"); }});
+                    if (typeof window.initCountryRadarRing === "function") {{
+                        try {{ window.initCountryRadarRing(); }} catch (e) {{ console.error("initCountryRadarRing:", e); }}
+                    }}
+                }});
+            }}
+
+            var cTrack = document.getElementById("country-year-slider-track");
+            var cMin = document.getElementById("country-handle-min");
+            var cMax = document.getElementById("country-handle-max");
+            if (!cTrack || !cMin || !cMax) return;
+
+            var countryTickHost = document.getElementById("country-year-slider-ticks");
+            if (countryTickHost && !countryTickHost._yearTickDelegation) {{
+                countryTickHost._yearTickDelegation = true;
+                countryTickHost.addEventListener("click", function(ev) {{
+                    var el = ev.target;
+                    if (!el || el.tagName !== "SPAN" || !countryTickHost.contains(el)) return;
+                    var spans = countryTickHost.children;
+                    var idx = -1;
+                    for (var si = 0; si < spans.length; si++) {{
+                        if (spans[si] === el) {{ idx = si; break; }}
+                    }}
+                    if (idx < 0) return;
+                    ev.preventDefault();
+                    if (typeof window._countryAnimateYearRangeTo === "function") {{
+                        window._countryAnimateYearRangeTo(idx, idx, function() {{
+                            if (typeof window.initCountryMap === "function") window.initCountryMap();
+                        }});
+                    }} else {{
+                        countryMinIdx = countryMaxIdx = idx;
+                        countryUpdateSliderUI();
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }}
+                }});
+            }}
+            var countryYearLbl = document.getElementById("country-year-range-label");
+            if (countryYearLbl && !countryYearLbl._countryYearRangeResetBound) {{
+                countryYearLbl._countryYearRangeResetBound = true;
+                countryYearLbl.addEventListener("click", function(ev) {{
+                    ev.preventDefault();
+                    var tLast = countryYears.length - 1;
+                    if (typeof window._countryAnimateYearRangeTo === "function") {{
+                        window._countryAnimateYearRangeTo(0, tLast, function() {{
+                            if (typeof window.initCountryMap === "function") window.initCountryMap();
+                        }});
+                    }} else {{
+                        countryMinIdx = 0;
+                        countryMaxIdx = tLast;
+                        countryUpdateSliderUI();
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }}
+                }});
+            }}
+
+            function attachCountryDrag(handle, isMin) {{
+                handle.addEventListener("mousedown", function(ev) {{
+                    ev.preventDefault();
+                    var track = document.getElementById("country-year-slider-track");
+                    if (track) {{ cTrackLeft = 0; cTrackRight = track.getBoundingClientRect().width; }}
+                    var startX = ev.clientX;
+                    var startLeftPx = isMin ? cXMinPx : cXMaxPx;
+                    function onMove(e) {{
+                        var tr = document.getElementById("country-year-slider-track");
+                        if (tr) {{ cTrackRight = tr.getBoundingClientRect().width; }}
+                        if (cTrackRight <= 0) return;
+                        var dx = e.clientX - startX;
+                        var newPx = startLeftPx + dx;
+                        if (newPx < cTrackLeft) newPx = cTrackLeft;
+                        if (newPx > cTrackRight) newPx = cTrackRight;
+                        if (isMin) {{
+                            if (newPx > cXMaxPx - 4) newPx = cXMaxPx - 4;
+                            cXMinPx = newPx;
+                        }} else {{
+                            if (newPx < cXMinPx + 4) newPx = cXMinPx + 4;
+                            cXMaxPx = newPx;
+                        }}
+                        countrySetHandlePositionsOnly(cXMinPx, cXMaxPx);
+                    }}
+                    function onUp() {{
+                        window.removeEventListener("mousemove", onMove);
+                        window.removeEventListener("mouseup", onUp);
+                        var tr = document.getElementById("country-year-slider-track");
+                        if (tr) {{ var r = tr.getBoundingClientRect(); cTrackLeft = 0; cTrackRight = r.width; }}
+                        if (cTrackRight <= 0) return;
+                        var t = countryYears.length - 1;
+                        if (t <= 0) return;
+                        getCountryTickCenters();
+                        if (countryTickCenters.length === countryYears.length) {{
+                            var bestMin = 0, bestMax = t;
+                            var bestDistL = 1e9, bestDistR = 1e9;
+                            for (var i = 0; i <= t; i++) {{
+                                var targetLeft = countryTickCenters[i] - cOffsetPx + cRailShiftPx;
+                                var targetRight = countryTickCenters[i] + cOffsetPx + cRailShiftPx;
+                                if (Math.abs(targetLeft - cXMinPx) < bestDistL) {{ bestDistL = Math.abs(targetLeft - cXMinPx); bestMin = i; }}
+                                if (Math.abs(targetRight - cXMaxPx) < bestDistR) {{ bestDistR = Math.abs(targetRight - cXMaxPx); bestMax = i; }}
+                            }}
+                            countryMinIdx = bestMin;
+                            countryMaxIdx = bestMax;
+                            if (countryMinIdx > countryMaxIdx) countryMaxIdx = countryMinIdx;
+                        }} else {{
+                            var span = cTrackRight - cTrackLeft;
+                            if (span <= 0) span = 1;
+                            var fracMin = (cXMinPx - cTrackLeft) / span;
+                            var fracMax = (cXMaxPx - cTrackLeft) / span;
+                            countryMinIdx = Math.max(0, Math.min(t, Math.round(fracMin * t)));
+                            countryMaxIdx = Math.max(0, Math.min(t, Math.round(fracMax * t)));
+                            if (countryMinIdx > countryMaxIdx) countryMaxIdx = countryMinIdx;
+                        }}
+                        countryUpdateSliderUI();
+                        if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    }}
+                    window.addEventListener("mousemove", onMove);
+                    window.addEventListener("mouseup", onUp);
+                }});
+            }}
+            attachCountryDrag(cMin, true);
+            attachCountryDrag(cMax, false);
+        }});
+
+        (function() {{
+            var d3s = document.createElement("script");
+            d3s.src = "https://cdn.jsdelivr.net/npm/d3@7";
+            d3s.onload = function() {{
+                var tjs = document.createElement("script");
+                tjs.src = "https://cdn.jsdelivr.net/npm/topojson@3";
+                document.head.appendChild(tjs);
+            }};
+            document.head.appendChild(d3s);
+        }})();
+    </script>
+    {peer_review_footer}
+</body>
+</html>
+"""
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+if __name__ == "__main__":
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    index_html = os.path.join(project_root, "index.html")
+    generate_html(index_html, peer_review=True, peer_review_lite=True)
+    size_mb = os.path.getsize(index_html) / (1024 * 1024)
+    print(f"HTML generated at: {index_html}")
+    print(f"File size: {size_mb:.2f} MB")
+
