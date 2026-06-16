@@ -4854,9 +4854,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
             if (tooltipEl) {{
                 window.homeCanvasMouseMoveHandler = function(ev) {{
-                    var rect = canvas.getBoundingClientRect();
-                    var x = ev.clientX - rect.left;
-                    var y = ev.clientY - rect.top;
+                    var ptr = getCanvasPointer(canvas, ev);
+                    var x = ptr.x;
+                    var y = ptr.y;
                     var hit = null;
                     for (var k = 0; k < segments.length; k++) {{
                         var b = segments[k];
@@ -7397,9 +7397,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
                 if (!window._mdbSdgCanvasMouseMove) {{
                     window._mdbSdgCanvasMouseMove = function(ev) {{
-                    var rect = canvas.getBoundingClientRect();
-                    var x = ev.clientX - rect.left;
-                    var y = ev.clientY - rect.top;
+                    var ptr = getCanvasPointer(canvas, ev);
+                    var x = ptr.x;
+                    var y = ptr.y;
 
                     var hit = null;
                     for (var i = 0; i < bars.length; i++) {{
@@ -7434,13 +7434,14 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     }}
 
                     tooltip.textContent = text;
-                    tooltip.style.display = "block";
-
                     var containerRect2 = container.getBoundingClientRect();
-                    var px = x + rect.left - containerRect2.left + 12;
-                    var py = y + rect.top - containerRect2.top - 28;
-                    tooltip.style.left = px + "px";
-                    tooltip.style.top = py + "px";
+                    positionTooltipInRect(
+                        tooltip,
+                        containerRect2,
+                        ev.clientX - containerRect2.left,
+                        ev.clientY - containerRect2.top,
+                        12
+                    );
                 }};
                     window._mdbSdgCanvasMouseLeave = function() {{
                     if (tooltip) tooltip.style.display = "none";
@@ -7741,7 +7742,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     var selected = idx === current;
                     tab.setAttribute("aria-selected", selected ? "true" : "false");
                     tab.disabled = (typeof config.isTabDisabled === "function") ? !!config.isTabDisabled(idx) : false;
-                    if (selected) tab.scrollIntoView({ block: "nearest", inline: "nearest", behavior: (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ? "auto" : "smooth" });
+                    if (selected) tab.scrollIntoView({{ block: "nearest", inline: "nearest", behavior: (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ? "auto" : "smooth" }});
+                }});
             }}
             var intro = document.querySelector(".home-intro-section");
             if (intro && config.hideIntroOnFilter) {{
@@ -8634,13 +8636,33 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             return "Unknown";
         }}
 
+        function getCanvasPointer(canvas, ev) {{
+            var rect = canvas.getBoundingClientRect();
+            var scaleX = canvas.width / (rect.width || 1);
+            var scaleY = canvas.height / (rect.height || 1);
+            return {{
+                rect: rect,
+                scaleX: scaleX,
+                scaleY: scaleY,
+                x: (ev.clientX - rect.left) * scaleX,
+                y: (ev.clientY - rect.top) * scaleY
+            }};
+        }}
+
         function positionTooltipInRect(tooltipEl, containerRect, pointerX, pointerY, pad) {{
             if (!tooltipEl || !containerRect) return;
             var safePad = (typeof pad === "number" ? pad : 12);
+            tooltipEl.style.display = "block";
             var tw = tooltipEl.offsetWidth || 180;
             var th = tooltipEl.offsetHeight || 72;
-            var left = (pointerX > containerRect.width * 0.55) ? (pointerX - tw - safePad) : (pointerX + safePad);
+            var left = pointerX + safePad;
+            if (left + tw > containerRect.width - safePad) {{
+                left = pointerX - tw - safePad;
+            }}
             var top = pointerY + 8;
+            if (top + th > containerRect.height - safePad) {{
+                top = pointerY - th - safePad;
+            }}
             var maxLeft = containerRect.width - tw - safePad;
             var maxTop = containerRect.height - th - safePad;
             if (left < safePad) left = safePad;
@@ -9662,9 +9684,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     var container = canvas.parentElement;
                     if (!container) return;
                     var containerRect = container.getBoundingClientRect();
-                    var w = Math.floor(containerRect.width) || 1400;
-                    var h = Math.floor(containerRect.height) || 760;
-                    if (w <= 0 || h <= 0) return;
+                    var w = Math.max(1, Math.floor(containerRect.width));
+                    var h = Math.max(1, Math.floor(containerRect.height));
+                    if (containerRect.width <= 0 || containerRect.height <= 0) return;
                     canvas.width = w;
                     canvas.height = h;
                     var ctx = canvas.getContext("2d");
@@ -10147,9 +10169,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                         }}
                         drawFrame();
                         window.countryBarChartMouseMoveHandler = function(ev) {{
-                            var rect = canvas.getBoundingClientRect();
-                            var x = ev.clientX - rect.left;
-                            var y = ev.clientY - rect.top;
+                            var ptr = getCanvasPointer(canvas, ev);
+                            var x = ptr.x;
+                            var y = ptr.y;
                             var hitBar = null;
                             var hitLine = null;
                             for (var k = 0; k < bars.length; k++) {{
