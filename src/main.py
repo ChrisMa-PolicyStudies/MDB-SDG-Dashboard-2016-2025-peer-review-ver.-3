@@ -924,7 +924,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             }}
         }}
 
-        @media (min-width: 769px) {{
+        @media (min-width: 1201px) {{
             .nav-menu-popover {{
                 display: flex !important;
                 align-items: center;
@@ -2478,7 +2478,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             flex: 1;
             width: 100%;
             max-width: 100%;
-            min-height: var(--layout-chart-min-height);
+            min-height: 0;
             height: auto;
             display: flex;
             flex-direction: column;
@@ -2511,13 +2511,15 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             flex: 1;
             width: 100%;
             max-width: 100%;
-            min-height: calc(var(--layout-chart-min-height) - 48px);
-            height: auto;
+            min-height: 0;
             position: relative;
             box-sizing: border-box;
             background: var(--color-surface);
+            overflow: hidden;
         }}
         #home-stack-canvas {{
+            position: absolute;
+            inset: 0;
             display: block;
             width: 100%;
             height: 100%;
@@ -3421,6 +3423,129 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 width: 100%;
                 max-width: none;
             }}
+            .nav {{
+                height: auto;
+                position: sticky;
+                top: 0;
+                z-index: var(--z-sticky);
+                background: var(--color-surface);
+                box-shadow: 0 4px 18px rgba(17, 24, 39, 0.08);
+            }}
+            .nav-inner {{
+                flex-direction: row;
+                align-items: center;
+                gap: var(--space-3);
+                padding: var(--space-3) var(--space-4);
+                border-bottom: 1px solid var(--color-divider);
+                width: 100%;
+            }}
+            .nav-brand {{
+                flex: 1;
+                min-width: 0;
+                gap: var(--space-3);
+                padding: 0;
+                border-bottom: none;
+            }}
+            .nav-brand-text {{
+                display: block;
+                flex: 1;
+                min-width: 0;
+            }}
+            .nav-brand-context {{
+                display: none;
+            }}
+            .nav-brand-name {{
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }}
+            .nav-home {{
+                margin-left: 0;
+                flex: 0 0 auto;
+                padding: 0;
+            }}
+            .nav-home img {{
+                height: 36px;
+                width: auto;
+            }}
+            .nav-menu-btn {{
+                display: inline-flex;
+            }}
+            .nav-menu-popover {{
+                margin: 0;
+                padding: var(--space-2) var(--space-4) var(--space-3);
+                border: none;
+                border-top: 1px solid var(--color-divider);
+                border-radius: 0;
+                background: var(--color-surface);
+                box-shadow: 0 10px 28px rgba(17, 24, 39, 0.12);
+                width: 100%;
+                max-width: none;
+                box-sizing: border-box;
+            }}
+            .nav-menu-popover:popover-open,
+            .nav-menu-popover.is-open {{
+                display: block;
+                position: fixed;
+                left: 0;
+                right: 0;
+                top: var(--nav-bar-height, 60px);
+                width: 100%;
+                z-index: calc(var(--z-sticky) + 1);
+                animation: nav-menu-reveal var(--duration-fast) var(--ease-out);
+            }}
+            .nav:has(.nav-menu-popover:popover-open),
+            .nav:has(.nav-menu-popover.is-open) {{
+                border-bottom-color: transparent;
+                box-shadow: none;
+            }}
+            .nav-tab-home {{
+                display: flex;
+            }}
+            .nav-label-long {{
+                display: none;
+            }}
+            .nav-label-short {{
+                display: none;
+            }}
+            .nav-links {{
+                display: flex;
+                flex-direction: column;
+                align-items: stretch;
+                gap: var(--space-1);
+                width: 100%;
+                margin: 0;
+                padding: 0;
+            }}
+            .nav-links a {{
+                min-height: 44px;
+                padding: var(--space-3) var(--space-4);
+                margin: 0;
+                font-size: 15px;
+                font-weight: 600;
+                line-height: 1.3;
+                text-align: left;
+                justify-content: flex-start;
+                align-items: center;
+                white-space: nowrap;
+                border-radius: 8px;
+                border: none;
+                color: var(--color-ink-muted);
+                background: transparent;
+                box-shadow: none;
+            }}
+            .nav-links a .nav-label-long {{
+                display: inline;
+            }}
+            .nav-links a.active,
+            .nav-links a[aria-selected="true"] {{
+                background: var(--color-accent-soft);
+                color: var(--color-accent);
+                box-shadow: none;
+            }}
+            .nav-links a:active {{
+                background: rgba(37, 99, 235, 0.18);
+            }}
         }}
 
         .nav-home:focus-visible,
@@ -3502,132 +3627,6 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             }}
             .home-welcome-text {{
                 font-size: 16px;
-            }}
-            .nav {{
-                height: auto;
-                position: sticky;
-                top: 0;
-                z-index: var(--z-sticky);
-                background: var(--color-surface);
-                box-shadow: 0 4px 18px rgba(17, 24, 39, 0.08);
-            }}
-            .nav-inner {{
-                flex-direction: row;
-                align-items: center;
-                gap: var(--space-3);
-                padding: var(--space-3) var(--space-4);
-                border-bottom: 1px solid var(--color-divider);
-            }}
-            .nav-brand {{
-                flex: 1;
-                min-width: 0;
-                gap: var(--space-3);
-                padding: 0;
-                border-bottom: none;
-            }}
-            .nav-brand-text {{
-                display: block;
-                flex: 1;
-                min-width: 0;
-            }}
-            .nav-brand-context {{
-                display: none;
-            }}
-            .nav-brand-name {{
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }}
-            .nav-home {{
-                margin-left: 0;
-                flex: 0 0 auto;
-                padding: 0;
-            }}
-            .nav-home img {{
-                height: 36px;
-                width: auto;
-            }}
-            .nav-menu-btn {{
-                display: inline-flex;
-            }}
-            .nav-menu-popover {{
-                margin: 0;
-                padding: var(--space-2) var(--space-4) var(--space-3);
-                border: none;
-                border-top: 1px solid var(--color-divider);
-                border-radius: 0;
-                background: var(--color-surface);
-                box-shadow: 0 10px 28px rgba(17, 24, 39, 0.12);
-                width: 100%;
-                max-width: none;
-                box-sizing: border-box;
-            }}
-            .nav-menu-popover:popover-open,
-            .nav-menu-popover.is-open {{
-                display: block;
-                position: fixed;
-                left: 0;
-                right: 0;
-                top: var(--nav-bar-height, 60px);
-                width: 100%;
-                z-index: calc(var(--z-sticky) + 1);
-                animation: nav-menu-reveal var(--duration-fast) var(--ease-out);
-            }}
-            .nav-inner {{
-                width: 100%;
-                border-bottom: 1px solid var(--color-divider);
-            }}
-            .nav:has(.nav-menu-popover:popover-open),
-            .nav:has(.nav-menu-popover.is-open) {{
-                border-bottom-color: transparent;
-                box-shadow: none;
-            }}
-            .nav-tab-home {{
-                display: flex;
-            }}
-            .nav-label-long {{
-                display: none;
-            }}
-            .nav-label-short {{
-                display: none;
-            }}
-            .nav-links {{
-                display: flex;
-                flex-direction: column;
-                align-items: stretch;
-                gap: var(--space-1);
-                width: 100%;
-                margin: 0;
-                padding: 0;
-            }}
-            .nav-links a {{
-                min-height: 44px;
-                padding: var(--space-3) var(--space-4);
-                margin: 0;
-                font-size: 15px;
-                font-weight: 600;
-                line-height: 1.3;
-                text-align: left;
-                justify-content: flex-start;
-                align-items: center;
-                white-space: nowrap;
-                border-radius: 8px;
-                border: none;
-                color: var(--color-ink-muted);
-                background: transparent;
-                box-shadow: none;
-            }}
-            .nav-links a .nav-label-long {{
-                display: inline;
-            }}
-            .nav-links a.active,
-            .nav-links a[aria-selected="true"] {{
-                background: var(--color-accent-soft);
-                color: var(--color-accent);
-                box-shadow: none;
-            }}
-            .nav-links a:active {{
-                background: rgba(37, 99, 235, 0.18);
             }}
             .sidebar {{
                 position: relative;
@@ -4366,8 +4365,18 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             var btn = document.getElementById("nav-menu-btn");
             var pop = document.getElementById("nav-menu-popover");
             if (!btn || !pop) return;
-            syncNavBarHeight();
-            window.addEventListener("resize", syncNavBarHeight);
+            var desktopNavMq = window.matchMedia("(min-width: 1201px)");
+            function syncNavMenuViewport() {{
+                syncNavBarHeight();
+                if (desktopNavMq.matches) closeNavMenu();
+            }}
+            syncNavMenuViewport();
+            window.addEventListener("resize", syncNavMenuViewport);
+            if (typeof desktopNavMq.addEventListener === "function") {{
+                desktopNavMq.addEventListener("change", syncNavMenuViewport);
+            }} else if (typeof desktopNavMq.addListener === "function") {{
+                desktopNavMq.addListener(syncNavMenuViewport);
+            }}
             if (typeof pop.showPopover !== "function") {{
                 btn.addEventListener("click", function(e) {{
                     e.preventDefault();
@@ -4547,7 +4556,11 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     refreshCountryCharts();
                 }}
                 if (document.getElementById("home-panel") && document.getElementById("home-panel").classList.contains("active")) {{
-                    if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+                    if (homeSlideIndex === 0 && typeof window.initHomeChartOnce === "function") {{
+                        window.initHomeChartOnce();
+                    }} else if (typeof redrawHomeRightSlide === "function") {{
+                        redrawHomeRightSlide();
+                    }}
                 }}
                 if (document.getElementById("mdb-panel") && document.getElementById("mdb-panel").classList.contains("active")) {{
                     if (mdbSlideIndex === 0 && typeof window.resizeMdbSdgChart === "function") {{
@@ -4561,6 +4574,15 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     }}
                 }}
             }}, 180);
+        }}
+
+        function bindLayoutResizeHandler() {{
+            if (window._layoutResizeBound) return;
+            window._layoutResizeBound = true;
+            window.addEventListener("resize", function() {{
+                syncSidebarHeight();
+                onLayoutResize();
+            }});
         }}
 
         window.initHomeChartOnce = function() {{
@@ -4637,20 +4659,31 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             var exportChartHeight = (typeof window.HOME_FIG_EXPORT_CHART_HEIGHT === "number" && window.HOME_FIG_EXPORT_CHART_HEIGHT > 0)
                 ? Math.round(window.HOME_FIG_EXPORT_CHART_HEIGHT)
                 : null;
-            var w = Math.max(320, Math.floor((document.querySelector(".home-stack-chart-wrap") || {{}}).clientWidth || (chartArea && chartArea.clientWidth) || 1352));
+            var w = Math.max(320, Math.floor(wrap.clientWidth || (chartArea && chartArea.clientWidth) || 1352));
             var h;
-            if (isMdbSelected && wrapperEl && legendEl && typeof window._homeDefaultLegendOffsetTop === "number" && window._homeDefaultLegendOffsetTop > 0) {{
-                h = window._homeDefaultLegendOffsetTop - 71;
-            }} else {{
-                h = isMdbSelected ? 830 : 630;
-            }}
             if (!isMdbSelected && exportChartHeight) {{
                 h = exportChartHeight;
                 if (wrap) wrap.style.height = exportChartHeight + "px";
                 if (chartArea) chartArea.style.height = (exportChartHeight + 40) + "px";
+            }} else {{
+                h = Math.floor(wrap.clientHeight || 0);
+                if (h < 200) {{
+                    h = isMdbSelected ? 830 : 630;
+                    var stackRetries = window._homeStackChartLayoutRetries || 0;
+                    if (stackRetries < 16) {{
+                        window._homeStackChartLayoutRetries = stackRetries + 1;
+                        requestAnimationFrame(function() {{
+                            if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
+                        }});
+                    }}
+                }} else {{
+                    window._homeStackChartLayoutRetries = 0;
+                }}
             }}
             canvas.width = w;
             canvas.height = h;
+            canvas.style.width = "100%";
+            canvas.style.height = "100%";
             var ctx = canvas.getContext("2d");
             var colors = window.SDG_COLORS || [];
             if (titleEl && window.MDB_NAMES) {{
@@ -4865,10 +4898,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     if (hoveredSegment !== hit) {{ hoveredSegment = hit; drawFrame(); }}
                     if (!hit) {{ tooltipEl.style.display = "none"; return; }}
                     var wrapRect = wrap.getBoundingClientRect();
-                    tooltipEl.style.display = "block";
-                    tooltipEl.style.left = (ev.clientX - wrapRect.left + 14) + "px";
-                    tooltipEl.style.top = (ev.clientY - wrapRect.top + 10) + "px";
                     tooltipEl.innerHTML = "<strong>" + hit.year + " · " + hit.label + "</strong><br/>" + (hit.type === "count" ? "Projects: " + Math.round(hit.value) : "Amount: " + hit.value.toFixed(2) + " B USD");
+                    positionTooltipInRect(tooltipEl, wrapRect, ev.clientX - wrapRect.left, ev.clientY - wrapRect.top, 12);
                 }};
                 window.homeCanvasMouseLeaveHandler = function() {{ hoveredSegment = null; if (tooltipEl) tooltipEl.style.display = "none"; drawFrame(); }};
                 canvas.addEventListener("mousemove", window.homeCanvasMouseMoveHandler);
@@ -5007,16 +5038,43 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             return 0.299 * r + 0.587 * g + 0.114 * b;
         }}
 
+        function homeChartViewportLimits() {{
+            var vh = window.innerHeight || 800;
+            var vw = window.innerWidth || 1200;
+            return {{
+                maxHeight: Math.max(360, Math.min(680, Math.floor(vh * 0.5))),
+                maxWidth: Math.max(320, Math.min(1400, Math.floor(vw * 0.88)))
+            }};
+        }}
+
+        function measureHomeSquareCanvasWrap(wrap) {{
+            var limits = homeChartViewportLimits();
+            var rect = wrap ? wrap.getBoundingClientRect() : {{ width: 480, height: 480 }};
+            var w = Math.floor(rect.width) || 480;
+            var boxH = Math.floor(rect.height) || w;
+            var size = Math.min(w, boxH, limits.maxHeight, limits.maxWidth);
+            size = Math.max(320, size);
+            return {{ width: size, height: size, size: size }};
+        }}
+
+        function measureHomeRectCanvasWrap(wrap) {{
+            var limits = homeChartViewportLimits();
+            var rect = wrap ? wrap.getBoundingClientRect() : {{ width: 480, height: 480 }};
+            var w = Math.max(320, Math.min(limits.maxWidth, Math.floor(rect.width) || 480));
+            var h = Math.max(320, Math.min(limits.maxHeight, Math.floor(rect.height) || 480));
+            return {{ width: w, height: h }};
+        }}
+
         function drawHomePieChart() {{
             var canvas = document.getElementById("home-pie-canvas");
             var centerTotal = document.getElementById("home-pie-center-total");
             if (!canvas) return;
             var wrap = canvas.closest(".home-pie-wrap");
             if (!wrap) return;
-            var rect = wrap.getBoundingClientRect();
-            var canvasWidth = Math.floor(rect.width) || 480;
-            var canvasHeight = Math.floor(rect.height) || 480;
-            var size = Math.min(canvasWidth, canvasHeight);
+            var box = measureHomeSquareCanvasWrap(wrap);
+            var canvasWidth = box.width;
+            var canvasHeight = box.height;
+            var size = box.size;
             var dpr = window.devicePixelRatio || 1;
             canvas.width = canvasWidth * dpr;
             canvas.height = canvasHeight * dpr;
@@ -5175,10 +5233,10 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             if (!canvas) return;
             var wrap = canvas.closest(".home-pie-wrap");
             if (!wrap) return;
-            var rect = wrap.getBoundingClientRect();
-            var canvasWidth = Math.floor(rect.width) || 480;
-            var canvasHeight = Math.floor(rect.height) || 480;
-            var size = Math.min(canvasWidth, canvasHeight);
+            var box = measureHomeSquareCanvasWrap(wrap);
+            var canvasWidth = box.width;
+            var canvasHeight = box.height;
+            var size = box.size;
             var dpr = window.devicePixelRatio || 1;
             canvas.width = canvasWidth * dpr;
             canvas.height = canvasHeight * dpr;
@@ -5418,10 +5476,10 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             if (!canvas) return;
             var wrap = canvas.closest(".home-pie-wrap");
             if (!wrap) return;
-            var rect = wrap.getBoundingClientRect();
-            var canvasWidth = Math.floor(rect.width) || 480;
-            var canvasHeight = Math.floor(rect.height) || 480;
-            var size = Math.min(canvasWidth, canvasHeight);
+            var box = measureHomeSquareCanvasWrap(wrap);
+            var canvasWidth = box.width;
+            var canvasHeight = box.height;
+            var size = box.size;
             var dpr = window.devicePixelRatio || 1;
             canvas.width = canvasWidth * dpr;
             canvas.height = canvasHeight * dpr;
@@ -6091,9 +6149,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             if (!canvas) return;
             var wrap = canvas.closest(".home-pie-wrap");
             if (!wrap) return;
-            var rect = wrap.getBoundingClientRect();
-            var canvasWidth = Math.floor(rect.width) || 480;
-            var canvasHeight = Math.floor(rect.height) || 480;
+            var box = measureHomeRectCanvasWrap(wrap);
+            var canvasWidth = box.width;
+            var canvasHeight = box.height;
             var dpr = window.devicePixelRatio || 1;
             canvas.width = canvasWidth * dpr;
             canvas.height = canvasHeight * dpr;
@@ -6655,10 +6713,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                             pieTooltip.innerHTML = isAmount
                                 ? "<strong>SDG " + (seg.sdgIndex + 1) + "</strong><br/>" + pct + "% · " + amountStr + " B USD"
                                 : "<strong>SDG " + (seg.sdgIndex + 1) + "</strong><br/>" + pct + "% · " + countStr + " projects";
-                            pieTooltip.style.display = "block";
                             var wrapRect = pieCanvas.closest(".home-pie-wrap").getBoundingClientRect();
-                            pieTooltip.style.left = (ev.clientX - wrapRect.left + 14) + "px";
-                            pieTooltip.style.top = (ev.clientY - wrapRect.top + 10) + "px";
+                            positionTooltipInRect(pieTooltip, wrapRect, ev.clientX - wrapRect.left, ev.clientY - wrapRect.top, 12);
                             return;
                         }}
                     }}
@@ -7590,18 +7646,13 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 }}
                 syncSidebarHeight();
                 syncLayoutSliders();
-                if (!window._mdbSdgLayoutResizeBound) {{
-                    window._mdbSdgLayoutResizeBound = true;
-                    window.addEventListener("resize", function() {{
-                        syncSidebarHeight();
-                        onLayoutResize();
-                    }});
-                }}
+                bindLayoutResizeHandler();
             }}, 120);
         }}
 
         document.addEventListener("DOMContentLoaded", function() {{
             whenDashboardReady(function() {{
+            bindLayoutResizeHandler();
             initChartNavigators();
             showView("home");
             requestAnimationFrame(function() {{
@@ -7760,28 +7811,43 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             updateMdbArrows();
         }}
 
+        var countryChartsLayoutTimer = null;
+        var countryChartsLayoutRaf = 0;
+
         function refreshCountryCharts() {{
             if (countrySlideIndex <= 1) {{
                 if (typeof window.initCountryMap === "function") window.initCountryMap();
             }} else if (countrySlideIndex === 2) {{
                 if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
                 if (typeof window.initCountryRadarRing === "function") {{
-                    try {{ window.initCountryRadarRing(); }} catch (e) {{}}
+                    try {{ window.initCountryRadarRing(); }} catch (e) {{ console.error("initCountryRadarRing:", e); }}
                 }}
             }} else if (countrySlideIndex === 3) {{
-                if (typeof syncMapSwitchFromRadar === "function") syncRadarSwitchFromRadar();
+                try {{
+                    if (typeof syncMapSwitchFromRadar === "function") syncMapSwitchFromRadar();
+                }} catch (e) {{ console.error("syncMapSwitchFromRadar:", e); }}
                 if (typeof window.initCountryBarChart === "function") {{
-                    try {{ window.initCountryBarChart(); }} catch (e) {{}}
+                    try {{ window.initCountryBarChart(); }} catch (e) {{ console.error("initCountryBarChart:", e); }}
+                }} else if ((window._countryChartInitDeferrals || 0) < 40) {{
+                    window._countryChartInitDeferrals = (window._countryChartInitDeferrals || 0) + 1;
+                    scheduleCountryChartsAfterLayout();
                 }}
             }}
         }}
 
         function scheduleCountryChartsAfterLayout() {{
-            requestAnimationFrame(function() {{
-                requestAnimationFrame(function() {{
+            if (countryChartsLayoutRaf) cancelAnimationFrame(countryChartsLayoutRaf);
+            countryChartsLayoutRaf = requestAnimationFrame(function() {{
+                countryChartsLayoutRaf = requestAnimationFrame(function() {{
+                    countryChartsLayoutRaf = 0;
                     refreshCountryCharts();
                 }});
             }});
+            if (countryChartsLayoutTimer) clearTimeout(countryChartsLayoutTimer);
+            countryChartsLayoutTimer = setTimeout(function() {{
+                countryChartsLayoutTimer = null;
+                refreshCountryCharts();
+            }}, 450);
         }}
 
         function setCountrySlideIndex(next) {{
@@ -8123,10 +8189,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     tooltipEl.textContent = text;
                     var area = canvas.closest(".mdb-square-plot-area");
                     var areaRect = area ? area.getBoundingClientRect() : rect;
-                    var tx = ev.clientX - areaRect.left + 12;
-                    var ty = ev.clientY - areaRect.top + 12;
-                    tooltipEl.style.left = Math.min(tx, areaRect.width - 180) + "px";
-                    tooltipEl.style.top = Math.min(ty, areaRect.height - 60) + "px";
+                    positionTooltipInRect(tooltipEl, areaRect, ev.clientX - areaRect.left, ev.clientY - areaRect.top, 12);
                     tooltipEl.classList.add("visible");
                 }}
                 function hideTip() {{ if (tooltipEl) tooltipEl.classList.remove("visible"); }}
@@ -8652,25 +8715,32 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         function positionTooltipInRect(tooltipEl, containerRect, pointerX, pointerY, pad) {{
             if (!tooltipEl || !containerRect) return;
             var safePad = (typeof pad === "number" ? pad : 12);
+            var gapY = 8;
             tooltipEl.style.display = "block";
+            tooltipEl.style.position = "fixed";
+            tooltipEl.style.right = "auto";
+            tooltipEl.style.bottom = "auto";
+            tooltipEl.style.margin = "0";
             var tw = tooltipEl.offsetWidth || 180;
             var th = tooltipEl.offsetHeight || 72;
-            var left = pointerX + safePad;
-            if (left + tw > containerRect.width - safePad) {{
-                left = pointerX - tw - safePad;
+            var vpX = containerRect.left + pointerX;
+            var vpY = containerRect.top + pointerY;
+            var vw = window.innerWidth || document.documentElement.clientWidth || 0;
+            var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+            var left = vpX + safePad;
+            var top = vpY + gapY;
+            if (left + tw > vw - safePad) {{
+                left = vpX - tw - safePad;
             }}
-            var top = pointerY + 8;
-            if (top + th > containerRect.height - safePad) {{
-                top = pointerY - th - safePad;
+            if (top + th > vh - safePad) {{
+                top = vpY - th - gapY;
             }}
-            var maxLeft = containerRect.width - tw - safePad;
-            var maxTop = containerRect.height - th - safePad;
             if (left < safePad) left = safePad;
-            if (maxLeft >= safePad && left > maxLeft) left = maxLeft;
             if (top < safePad) top = safePad;
-            if (maxTop >= safePad && top > maxTop) top = maxTop;
-            tooltipEl.style.left = left + "px";
-            tooltipEl.style.top = top + "px";
+            if (left + tw > vw - safePad) left = Math.max(safePad, vw - tw - safePad);
+            if (top + th > vh - safePad) top = Math.max(safePad, vh - th - safePad);
+            tooltipEl.style.left = Math.round(left) + "px";
+            tooltipEl.style.top = Math.round(top) + "px";
         }}
 
         var d3LoadPromise = null;
@@ -8927,6 +8997,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 }}
                 if (selectedCountryCode && pinnedTooltip && tooltipEl) {{
                     tooltipEl.innerHTML = pinnedTooltip.html;
+                    tooltipEl.style.position = "fixed";
                     tooltipEl.style.left = pinnedTooltip.left;
                     tooltipEl.style.top = pinnedTooltip.top;
                     tooltipEl.style.display = "block";
@@ -9181,6 +9252,24 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     document.querySelectorAll(".sidebar .mdb-button").forEach(function(b) {{ b.classList.remove("selected"); }});
                     if (typeof window.initCountryMap === "function") window.initCountryMap();
                 }});
+            }}
+            var countryMapSlider = document.getElementById("country-map-slider");
+            if (countryMapSlider && !countryMapSlider._countrySlideTransitionBound) {{
+                countryMapSlider._countrySlideTransitionBound = true;
+                countryMapSlider.addEventListener("transitionend", function(ev) {{
+                    if (ev.propertyName !== "transform") return;
+                    if (countrySlideIndex >= 2) scheduleCountryChartsAfterLayout();
+                }});
+            }}
+            var countryBarchartContainer = document.getElementById("country-barchart-container");
+            if (countryBarchartContainer && typeof ResizeObserver !== "undefined" && !countryBarchartContainer._countryBarChartResizeBound) {{
+                countryBarchartContainer._countryBarChartResizeBound = true;
+                var countryBarChartResizeObserver = new ResizeObserver(function() {{
+                    if (countrySlideIndex === 3 && typeof window.initCountryBarChart === "function") {{
+                        try {{ window.initCountryBarChart(); }} catch (e) {{ console.error("initCountryBarChart:", e); }}
+                    }}
+                }});
+                countryBarChartResizeObserver.observe(countryBarchartContainer);
             }}
             var countryBarchartBackBtn = document.getElementById("country-barchart-back-btn");
             if (countryBarchartBackBtn) {{
@@ -9698,15 +9787,16 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     var containerRect = container.getBoundingClientRect();
                     var w = Math.max(1, Math.floor(containerRect.width));
                     var h = Math.max(1, Math.floor(containerRect.height));
-                    if (containerRect.width <= 0 || containerRect.height <= 0) {{
+                    if (containerRect.width <= 0 || containerRect.height <= 0 || w < 320 || h < 200) {{
                         var retries = window._countryBarChartLayoutRetries || 0;
-                        if (retries < 12) {{
+                        if (retries < 24) {{
                             window._countryBarChartLayoutRetries = retries + 1;
                             requestAnimationFrame(function() {{ window.initCountryBarChart(); }});
                         }}
                         return;
                     }}
                     window._countryBarChartLayoutRetries = 0;
+                    window._countryChartInitDeferrals = 0;
                     canvas.width = w;
                     canvas.height = h;
                     var ctx = canvas.getContext("2d");
@@ -10301,14 +10391,18 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                                             var tooltipR = (rInner + sector.rCurrent) / 2;
                                             var tooltipX = cx + tooltipR * Math.cos(tooltipAngle);
                                             var tooltipY = cy + tooltipR * Math.sin(tooltipAngle);
-                                            tooltipEl.style.display = "block";
-                                            tooltipEl.style.left = (tooltipX + containerRect.width / 2 - size / 2 + 14) + "px";
-                                            tooltipEl.style.top = (tooltipY + containerRect.height / 2 - size / 2 + 10) + "px";
                                             if (sector.isAmountMode) {{
                                                 tooltipEl.innerHTML = "<strong>SDG " + (sector.i + 1) + "</strong><br/>Amount: " + sector.value.toFixed(2) + " B USD";
                                             }} else {{
                                                 tooltipEl.innerHTML = "<strong>SDG " + (sector.i + 1) + "</strong><br/>Projects: " + Math.round(sector.value);
                                             }}
+                                            positionTooltipInRect(
+                                                tooltipEl,
+                                                containerRect,
+                                                tooltipX + containerRect.width / 2 - size / 2,
+                                                tooltipY + containerRect.height / 2 - size / 2,
+                                                12
+                                            );
                                         }}
                                     }}
                                 }}
