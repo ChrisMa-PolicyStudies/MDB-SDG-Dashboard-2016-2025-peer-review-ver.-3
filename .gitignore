@@ -18,8 +18,9 @@ env/
 # Impeccable (local live tooling)
 .impeccable/
 
-# Generated runtime payloads (refreshed by src/main.py)
-data/runtime/
+# Generated runtime payloads (refreshed by src/main.py; commit JSON for GitHub Pages deploy)
+data/runtime/*
+!data/runtime/*.json
 
 # Secrets
 .env
