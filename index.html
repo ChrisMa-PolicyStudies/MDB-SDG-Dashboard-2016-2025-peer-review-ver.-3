@@ -3956,9 +3956,9 @@
             if (viewId === "country") {
                 setActiveNav("nav-view-country");
                 updateNavSectionLabel("country");
-                if (typeof window.initCountryMap === "function") window.initCountryMap();
                 updateCountryArrows();
                 if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
+                scheduleCountryChartsAfterLayout();
                 requestAnimationFrame(function() {
                     if (typeof countryUpdateSliderUI === "function") countryUpdateSliderUI();
                     if (typeof syncSidebarHeight === "function") syncSidebarHeight();
@@ -4015,7 +4015,7 @@
             layoutResizeTimer = setTimeout(function() {
                 syncLayoutSliders();
                 if (document.getElementById("country-panel") && document.getElementById("country-panel").classList.contains("active")) {
-                    if (typeof window.initCountryMap === "function") window.initCountryMap();
+                    refreshCountryCharts();
                 }
                 if (document.getElementById("home-panel") && document.getElementById("home-panel").classList.contains("active")) {
                     if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
@@ -6308,22 +6308,8 @@
                 countrySelectedMdbIndex = (n >= 1 && n <= (window.MDB_TOTALS && window.MDB_TOTALS.length) ? n : 0) || 0;
                 var mdbButtons = document.querySelectorAll(".sidebar .mdb-button");
                 mdbButtons.forEach(function(b, i) { b.classList.toggle("selected", i + 1 === countrySelectedMdbIndex); });
-                if (countrySlideIndex === 2) {
-                    if (typeof window.initCountryRadarRing === "function") {
-                        try {
-                            window.initCountryRadarRing();
-                        } catch (e) {
-                            console.error("Error updating country radar chart:", e);
-                        }
-                    }
-                } else if (countrySlideIndex === 3) {
-                    if (typeof window.initCountryBarChart === "function") {
-                        try {
-                            window.initCountryBarChart();
-                        } catch (e) {
-                            console.error("Error updating country bar chart:", e);
-                        }
-                    }
+                if (countrySlideIndex === 2 || countrySlideIndex === 3) {
+                    scheduleCountryChartsAfterLayout();
                 } else {
                     if (typeof window.initCountryMap === "function") window.initCountryMap();
                 }
@@ -7245,20 +7231,34 @@
             updateMdbArrows();
         }
 
+        function refreshCountryCharts() {
+            if (countrySlideIndex <= 1) {
+                if (typeof window.initCountryMap === "function") window.initCountryMap();
+            } else if (countrySlideIndex === 2) {
+                if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
+                if (typeof window.initCountryRadarRing === "function") {
+                    try { window.initCountryRadarRing(); } catch (e) {}
+                }
+            } else if (countrySlideIndex === 3) {
+                if (typeof syncMapSwitchFromRadar === "function") syncRadarSwitchFromRadar();
+                if (typeof window.initCountryBarChart === "function") {
+                    try { window.initCountryBarChart(); } catch (e) {}
+                }
+            }
+        }
+
+        function scheduleCountryChartsAfterLayout() {
+            requestAnimationFrame(function() {
+                requestAnimationFrame(function() {
+                    refreshCountryCharts();
+                });
+            });
+        }
+
         function setCountrySlideIndex(next) {
             countrySlideIndex = next;
             updateCountryArrows();
-            if (countrySlideIndex <= 1 && typeof window.initCountryMap === "function") window.initCountryMap();
-            if (countrySlideIndex === 2) {
-                if (typeof syncRadarSwitchFromMap === "function") syncRadarSwitchFromMap();
-                requestAnimationFrame(function() {
-                    if (typeof window.initCountryRadarRing === "function") { try { window.initCountryRadarRing(); } catch (e) {} }
-                });
-            }
-            if (countrySlideIndex === 3) {
-                if (typeof syncMapSwitchFromRadar === "function") syncMapSwitchFromRadar();
-                if (typeof window.initCountryBarChart === "function") { try { window.initCountryBarChart(); } catch (e) {} }
-            }
+            scheduleCountryChartsAfterLayout();
         }
 
         function countryNavItems() {
@@ -8170,7 +8170,13 @@
             var errEl = document.getElementById("country-map-error");
             function runInitCountryMap() {
             if (errEl) { errEl.classList.remove("visible"); errEl.textContent = ""; }
-            if (!window.COUNTRY_TOTALS) { if (errEl) { errEl.textContent = "Country data not loaded."; errEl.classList.add("visible"); } return; }
+            if (!window.COUNTRY_TOTALS) {
+                if (errEl) { errEl.textContent = "Country data not loaded."; errEl.classList.add("visible"); }
+                if (typeof whenDashboardReady === "function") {
+                    whenDashboardReady(function() { window.initCountryMap(); });
+                }
+                return;
+            }
             var mapContainer = document.querySelector("#country-panel .map-container");
             if (mapContainer) {
                 countryMapWidth = Math.max(320, Math.floor(mapContainer.clientWidth) || 1400);
@@ -8361,6 +8367,7 @@
                         }
                         drawMap();
                         updateCountryArrows();
+                        if (countrySlideIndex >= 2) scheduleCountryChartsAfterLayout();
                     });
 
                 g.append("path")
@@ -9130,7 +9137,12 @@
                 try {
                     var canvas = document.getElementById("country-barchart-canvas");
                     if (!canvas) return;
-                    if (!window.COUNTRY_TOTALS) return;
+                    if (!window.COUNTRY_TOTALS) {
+                        if (typeof whenDashboardReady === "function") {
+                            whenDashboardReady(function() { window.initCountryBarChart(); });
+                        }
+                        return;
+                    }
                     if (typeof getCountryByCountry !== "function") return;
                     if (typeof getCountryRecord !== "function") return;
                     var mdbIndex = countrySelectedMdbIndex || 0;
@@ -9157,7 +9169,15 @@
                     var containerRect = container.getBoundingClientRect();
                     var w = Math.max(1, Math.floor(containerRect.width));
                     var h = Math.max(1, Math.floor(containerRect.height));
-                    if (containerRect.width <= 0 || containerRect.height <= 0) return;
+                    if (containerRect.width <= 0 || containerRect.height <= 0) {
+                        var retries = window._countryBarChartLayoutRetries || 0;
+                        if (retries < 12) {
+                            window._countryBarChartLayoutRetries = retries + 1;
+                            requestAnimationFrame(function() { window.initCountryBarChart(); });
+                        }
+                        return;
+                    }
+                    window._countryBarChartLayoutRetries = 0;
                     canvas.width = w;
                     canvas.height = h;
                     var ctx = canvas.getContext("2d");
