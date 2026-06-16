@@ -288,6 +288,7 @@ def _write_json_file(path: str, payload) -> None:
 
 def _write_dashboard_runtime_data(
     *,
+    output_dir: str,
     mdb_totals_list,
     country_totals,
     most_relevant_sdg,
@@ -317,7 +318,7 @@ def _write_dashboard_runtime_data(
         _write_json_file(os.path.join(RUNTIME_DATA_DIR, name), payload)
 
     def rel(path: str) -> str:
-        return os.path.relpath(path, PROJECT_ROOT).replace(os.sep, "/")
+        return os.path.relpath(path, output_dir).replace(os.sep, "/")
 
     topology_path = _topology_data_path()
     if not topology_path:
@@ -617,6 +618,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
         include_vectors=True,
     )
     data_manifest = _write_dashboard_runtime_data(
+        output_dir=output_dir,
         mdb_totals_list=mdb_totals_list,
         country_totals=country_totals,
         most_relevant_sdg=most_relevant_sdg,
@@ -4548,9 +4550,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     if (typeof window.initHomeChartOnce === "function") window.initHomeChartOnce();
                 }}
                 if (document.getElementById("mdb-panel") && document.getElementById("mdb-panel").classList.contains("active")) {{
-                    if (mdbSlideIndex === 0 && typeof window.setSdgChartData === "function") {{
-                        window.mdbChartInited = false;
-                        if (typeof initMdbChartOnce === "function") initMdbChartOnce();
+                    if (mdbSlideIndex === 0 && typeof window.resizeMdbSdgChart === "function") {{
+                        window.resizeMdbSdgChart();
                     }} else if (mdbSlideIndex === 1 && typeof drawMdbCooccurrenceHeatmap === "function") {{
                         drawMdbCooccurrenceHeatmap();
                     }} else if (mdbSlideIndex === 2 && typeof window.drawMdbAmountHistogram === "function") {{
@@ -6919,50 +6920,74 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
 
             var ctx = canvas.getContext("2d");
 
-            var containerWidth = container.clientWidth || 1400;
-            var containerHeight = container.clientHeight || 700;
-            canvas.width = containerWidth;
-            canvas.height = containerHeight;
-
             var sidePadding = 100;
             var gapBetweenLogos = 4;
             var numLogos = 17;
-            var availableWidth = containerWidth - sidePadding * 2;
-            var totalGapWidth = gapBetweenLogos * (numLogos - 1);
-            var logoSize = Math.floor((availableWidth - totalGapWidth) / numLogos);
-            if (logoSize < 12) logoSize = 12;
+            var containerWidth;
+            var containerHeight;
+            var logoSize;
 
-            // 摆放 SDG logos
-            logosContainer.innerHTML = "";
-            for (var i = 0; i < numLogos; i++) {{
-                var logoDiv = document.createElement("div");
-                logoDiv.className = "sdg-logo-item";
-                var img = document.createElement("img");
-                img.src = iconPaths[i];
-                img.alt = "SDG " + (i + 1);
-                img.style.width = logoSize + "px";
-                img.style.height = logoSize + "px";
-                logoDiv.appendChild(img);
-                logosContainer.appendChild(logoDiv);
+            function rebuildMdbSdgLogos() {{
+                containerWidth = container.clientWidth || 1400;
+                containerHeight = container.clientHeight || 700;
+                canvas.width = containerWidth;
+                canvas.height = containerHeight;
+                var availableWidth = containerWidth - sidePadding * 2;
+                var totalGapWidth = gapBetweenLogos * (numLogos - 1);
+                logoSize = Math.floor((availableWidth - totalGapWidth) / numLogos);
+                if (logoSize < 12) logoSize = 12;
+                logosContainer.innerHTML = "";
+                for (var i = 0; i < numLogos; i++) {{
+                    var logoDiv = document.createElement("div");
+                    logoDiv.className = "sdg-logo-item";
+                    var img = document.createElement("img");
+                    img.src = iconPaths[i];
+                    img.alt = "SDG " + (i + 1);
+                    img.style.width = logoSize + "px";
+                    img.style.height = logoSize + "px";
+                    logoDiv.appendChild(img);
+                    logosContainer.appendChild(logoDiv);
+                }}
             }}
 
-            setTimeout(function() {{
-                // 计算每个 logo 的中心位置和整体上下边界
-                var logoImages = logosContainer.querySelectorAll(".sdg-logo-item img");
-                if (logoImages.length !== numLogos) return;
+            rebuildMdbSdgLogos();
 
-                var containerRect = container.getBoundingClientRect();
+            setTimeout(function() {{
                 var logoCenters = [];
                 var logoTop = Infinity;
                 var logoBottom = -Infinity;
+                var axisTitleGap = 34;
+                var topChartTop = axisTitleGap;
+                var topChartBottom;
+                var bottomChartTop;
+                var bottomChartBottom;
+                var barWidth;
 
-                for (var i = 0; i < logoImages.length; i++) {{
-                    var r = logoImages[i].getBoundingClientRect();
-                    var cx = r.left - containerRect.left + r.width / 2;
-                    logoCenters.push(cx);
-                    logoTop = Math.min(logoTop, r.top - containerRect.top);
-                    logoBottom = Math.max(logoBottom, r.bottom - containerRect.top);
+                function syncMdbSdgGeometry() {{
+                    var logoImages = logosContainer.querySelectorAll(".sdg-logo-item img");
+                    if (logoImages.length !== numLogos) return false;
+                    var containerRect = container.getBoundingClientRect();
+                    logoCenters.length = 0;
+                    logoTop = Infinity;
+                    logoBottom = -Infinity;
+                    for (var i = 0; i < logoImages.length; i++) {{
+                        var r = logoImages[i].getBoundingClientRect();
+                        var cx = r.left - containerRect.left + r.width / 2;
+                        logoCenters.push(cx);
+                        logoTop = Math.min(logoTop, r.top - containerRect.top);
+                        logoBottom = Math.max(logoBottom, r.bottom - containerRect.top);
+                    }}
+                    topChartBottom = logoTop - 8;
+                    bottomChartTop = logoBottom + 8;
+                    bottomChartBottom = containerHeight - axisTitleGap;
+                    if (topChartBottom <= topChartTop + 40) topChartBottom = topChartTop + 40;
+                    if (bottomChartBottom <= bottomChartTop + 40) bottomChartBottom = bottomChartTop + 40;
+                    barWidth = logoSize - 4;
+                    if (barWidth < 4) barWidth = 4;
+                    return true;
                 }}
+
+                if (!syncMdbSdgGeometry()) return;
 
                 var labels = totals.sdg_labels;
                 var baseCounts = totals.project_count_by_sdg;
@@ -6977,16 +7002,6 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 var maxAmount = Math.max.apply(null, baseAmountB);
                 if (!(maxCount > 0)) maxCount = 1;
                 if (!(maxAmount > 0)) maxAmount = 1;
-
-                // 为 5 根刻度线预留空间：轴标题远离刻度，刻度线间距略收紧
-                var axisTitleGap = 34;
-                var topChartTop = axisTitleGap;
-                var topChartBottom = logoTop - 8;
-                var bottomChartTop = logoBottom + 8;
-                var bottomChartBottom = containerHeight - axisTitleGap;
-
-                if (topChartBottom <= topChartTop + 40) topChartBottom = topChartTop + 40;
-                if (bottomChartBottom <= bottomChartTop + 40) bottomChartBottom = bottomChartTop + 40;
 
                 function niceTicks(maxVal) {{
                     if (!(maxVal > 0)) return [0];
@@ -7236,9 +7251,6 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 animEndCounts = counts.slice();
                 animEndAmounts = amountB.slice();
 
-                var barWidth = logoSize - 4;
-                if (barWidth < 4) barWidth = 4;
-
                 var bars = [];
                 var hoveredBar = null;
                 var lastProgress = 0;
@@ -7383,7 +7395,8 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     container.appendChild(tooltip);
                 }}
 
-                canvas.addEventListener("mousemove", function(ev) {{
+                if (!window._mdbSdgCanvasMouseMove) {{
+                    window._mdbSdgCanvasMouseMove = function(ev) {{
                     var rect = canvas.getBoundingClientRect();
                     var x = ev.clientX - rect.left;
                     var y = ev.clientY - rect.top;
@@ -7428,16 +7441,19 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     var py = y + rect.top - containerRect2.top - 28;
                     tooltip.style.left = px + "px";
                     tooltip.style.top = py + "px";
-                }});
-
-                canvas.addEventListener("mouseleave", function() {{
+                }};
+                    window._mdbSdgCanvasMouseLeave = function() {{
                     if (tooltip) tooltip.style.display = "none";
                     if (hoveredBar) {{ hoveredBar = null; drawFrame(lastProgress); }}
-                }});
+                }};
+                    canvas.addEventListener("mousemove", window._mdbSdgCanvasMouseMove);
+                    canvas.addEventListener("mouseleave", window._mdbSdgCanvasMouseLeave);
+                }}
 
                 // 滑块拖动：拖动时仅更新手柄位置（跟手），松手时再按年份更新数据并动画
                 function attachHandleDrag(handle, isMin) {{
-                    if (!handle) return;
+                    if (!handle || handle._mdbSdgDragBound) return;
+                    handle._mdbSdgDragBound = true;
                     handle.addEventListener("mousedown", function(ev) {{
                         ev.preventDefault();
                         var startX = ev.clientX;
@@ -7569,15 +7585,31 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     syncMdbAmountHistYearRange();
                 }};
 
-                document.getElementById("chart-back-btn").addEventListener("click", function() {{
-                    if (typeof window.goToMdbView === "function") window.goToMdbView();
-                }});
+                window.resizeMdbSdgChart = function() {{
+                    rebuildMdbSdgLogos();
+                    requestAnimationFrame(function() {{
+                        if (!syncMdbSdgGeometry()) return;
+                        updateSliderUI();
+                        drawFrame(lastProgress);
+                    }});
+                }};
+
+                var chartBackBtn = document.getElementById("chart-back-btn");
+                if (chartBackBtn && !chartBackBtn._mdbChartBackBound) {{
+                    chartBackBtn._mdbChartBackBound = true;
+                    chartBackBtn.addEventListener("click", function() {{
+                        if (typeof window.goToMdbView === "function") window.goToMdbView();
+                    }});
+                }}
                 syncSidebarHeight();
                 syncLayoutSliders();
-                window.addEventListener("resize", function() {{
-                    syncSidebarHeight();
-                    onLayoutResize();
-                }});
+                if (!window._mdbSdgLayoutResizeBound) {{
+                    window._mdbSdgLayoutResizeBound = true;
+                    window.addEventListener("resize", function() {{
+                        syncSidebarHeight();
+                        onLayoutResize();
+                    }});
+                }}
             }}, 120);
         }}
 
