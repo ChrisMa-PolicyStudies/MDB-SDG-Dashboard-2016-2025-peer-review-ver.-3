@@ -7709,8 +7709,7 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                     var selected = idx === current;
                     tab.setAttribute("aria-selected", selected ? "true" : "false");
                     tab.disabled = (typeof config.isTabDisabled === "function") ? !!config.isTabDisabled(idx) : false;
-                    if (selected) tab.scrollIntoView({{ block: "nearest", inline: "nearest", behavior: "smooth" }});
-                }});
+                    if (selected) tab.scrollIntoView({ block: "nearest", inline: "nearest", behavior: (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ? "auto" : "smooth" });
             }}
             var intro = document.querySelector(".home-intro-section");
             if (intro && config.hideIntroOnFilter) {{
