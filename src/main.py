@@ -7811,6 +7811,9 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
             updateMdbArrows();
         }}
 
+        var countryChartsLayoutTimer = null;
+        var countryChartsLayoutRaf = 0;
+
         function refreshCountryCharts() {{
             if (countrySlideIndex <= 1) {{
                 if (typeof window.initCountryMap === "function") window.initCountryMap();
@@ -7831,9 +7834,6 @@ def generate_html(output_path: str, *, peer_review: bool = False, peer_review_li
                 }}
             }}
         }}
-
-        var countryChartsLayoutTimer = null;
-        var countryChartsLayoutRaf = 0;
 
         function scheduleCountryChartsAfterLayout() {{
             if (countryChartsLayoutRaf) cancelAnimationFrame(countryChartsLayoutRaf);
